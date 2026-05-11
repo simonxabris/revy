@@ -10,3 +10,7 @@ The goal is to let a user launch the app inside any Git repo and review the curr
 - Users can then dispatch an AI agent with a prompt plus the comments they created.
 
 At a high level, this is an interactive review workflow: inspect changed files, annotate specific code, then hand structured review context to an AI agent for follow-up work.
+
+# Opentui
+
+The source code for opentui is cloned into the `opentui` dir. Use it to search for patterns.

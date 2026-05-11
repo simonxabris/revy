@@ -1,6 +1,8 @@
-import React, { useMemo, useState } from "react"
-import { createCliRenderer, fg, bold, t, SyntaxStyle, parseColor } from "@opentui/core"
+import React, { useEffect, useMemo, useRef, useState } from "react"
+import { createCliRenderer, fg, bold, pathToFiletype, t, type DiffRenderable } from "@opentui/core"
 import { createRoot, useKeyboard, useRenderer } from "@opentui/react"
+import ayuDark from 'tm-themes/themes/ayu-dark.json'
+import { shikiThemeToDiffTheme } from "./theme-mapper"
 
 interface ChangedFile {
   path: string
@@ -35,18 +37,18 @@ function loadDiff(path: string): string {
   return [staged, unstaged].filter(Boolean).join("\n")
 }
 
-function filetypeForPath(path: string): string | undefined {
-  const ext = path.split(".").pop()?.toLowerCase()
-  const byExtension: Record<string, string> = {
-    js: "javascript",
-    jsx: "javascript",
-    ts: "typescript",
-    tsx: "typescript",
-    md: "markdown",
-    markdown: "markdown",
-    zig: "zig",
-  }
-  return ext ? byExtension[ext] : undefined
+type DiffLineType = "add" | "remove" | "context"
+
+function getDiffLineTypes(diff: string): DiffLineType[] {
+  return diff
+    .split("\n")
+    .filter((line) => !line.startsWith("diff --git") && !line.startsWith("index ") && !line.startsWith("--- ") && !line.startsWith("+++ ") && !line.startsWith("@@"))
+    .flatMap((line) => {
+      if (line.startsWith("+")) return ["add" as const]
+      if (line.startsWith("-")) return ["remove" as const]
+      if (line.startsWith(" ")) return ["context" as const]
+      return []
+    })
 }
 
 const theme = {
@@ -67,51 +69,118 @@ const theme = {
   removedLineNumberBg: "#3d1f23",
   selectionBg: "#264f78",
   selectionFg: "#ffffff",
-  syntaxStyle: {
-    keyword: { fg: parseColor("#ff7b72"), bold: true },
-    "keyword.import": { fg: parseColor("#ff7b72"), bold: true },
-    string: { fg: parseColor("#a5d6ff") },
-    comment: { fg: parseColor("#8b949e"), italic: true },
-    number: { fg: parseColor("#79c0ff") },
-    boolean: { fg: parseColor("#79c0ff") },
-    constant: { fg: parseColor("#79c0ff") },
-    function: { fg: parseColor("#d2a8ff") },
-    "function.call": { fg: parseColor("#d2a8ff") },
-    constructor: { fg: parseColor("#ffa657") },
-    type: { fg: parseColor("#ffa657") },
-    operator: { fg: parseColor("#ff7b72") },
-    variable: { fg: parseColor("#e6edf3") },
-    property: { fg: parseColor("#79c0ff") },
-    bracket: { fg: parseColor("#e6edf3") },
-    punctuation: { fg: parseColor("#e6edf3") },
-    default: { fg: parseColor("#e6edf3") },
-  },
 }
+
 
 function App() {
   const renderer = useRenderer()
   const [files, setFiles] = useState<ChangedFile[]>(() => loadChangedFiles())
   const [selectedIndex, setSelectedIndex] = useState(0)
-  const syntaxStyle = useMemo(() => SyntaxStyle.fromStyles(theme.syntaxStyle), [])
+  const [focusMode, setFocusMode] = useState<"tree" | "diff">("tree")
+  const [diffScrollY, setDiffScrollY] = useState(0)
+  const [currentDiffLine, setCurrentDiffLine] = useState(0)
+  const diffRef = useRef<DiffRenderable | null>(null)
+  const diffTheme = useMemo(() => shikiThemeToDiffTheme(ayuDark), [])
 
   const selected = files[selectedIndex]
   const diff = selected ? loadDiff(selected.path) : ""
   const hasPatch = diff.startsWith("diff --git") || diff.startsWith("--- ")
+  const diffLineTypes = useMemo(() => getDiffLineTypes(diff), [diff])
+  const diffLineCount = diffLineTypes.length
+
+  useEffect(() => {
+    const diffRenderable = diffRef.current as unknown as {
+      leftCodeRenderable?: { scrollY: number }
+      rightCodeRenderable?: { scrollY: number }
+    } | null
+    if (diffRenderable?.leftCodeRenderable) diffRenderable.leftCodeRenderable.scrollY = diffScrollY
+    if (diffRenderable?.rightCodeRenderable) diffRenderable.rightCodeRenderable.scrollY = diffScrollY
+    renderer?.requestRender()
+  }, [diffScrollY, renderer])
+
+  useEffect(() => {
+    if (!hasPatch || !diffRef.current) return
+
+    const lineColors = new Map<number, { gutter: string; content: string }>()
+    diffLineTypes.forEach((type, index) => {
+      if (type === "add") lineColors.set(index, { gutter: diffTheme.addedLineNumberBg, content: diffTheme.addedBg })
+      else if (type === "remove") lineColors.set(index, { gutter: diffTheme.removedLineNumberBg, content: diffTheme.removedBg })
+      else lineColors.set(index, { gutter: diffTheme.lineNumberBg, content: diffTheme.contextBg })
+    })
+
+    if (focusMode === "diff" && diffLineCount > 0) {
+      lineColors.set(currentDiffLine, { gutter: diffTheme.activeLineNumberBg, content: diffTheme.activeLineBg })
+    }
+
+    diffRef.current.setLineColors(lineColors)
+    renderer?.requestRender()
+  }, [currentDiffLine, diffLineCount, diffLineTypes, diffTheme, focusMode, hasPatch, renderer])
+
+  function resetDiffState(): void {
+    setDiffScrollY(0)
+    setCurrentDiffLine(0)
+    setFocusMode("tree")
+  }
+
+  function selectFile(nextIndex: number): void {
+    const clampedIndex = Math.max(0, Math.min(files.length - 1, nextIndex))
+    if (files[clampedIndex]?.path !== selected?.path) resetDiffState()
+    setSelectedIndex(clampedIndex)
+  }
+
+  function moveDiffCursor(delta: number): void {
+    if (diffLineCount === 0) return
+    const viewportHeight = Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
+
+    setCurrentDiffLine((line) => {
+      const nextLine = Math.max(0, Math.min(diffLineCount - 1, line + delta))
+      setDiffScrollY((scrollY) => {
+        if (nextLine < scrollY) return nextLine
+        if (nextLine >= scrollY + viewportHeight) return nextLine - viewportHeight + 1
+        return scrollY
+      })
+      return nextLine
+    })
+  }
 
   function refresh(): void {
     const nextFiles = loadChangedFiles()
+    const nextIndex = Math.max(0, Math.min(selectedIndex, nextFiles.length - 1))
+    if (nextFiles[nextIndex]?.path !== selected?.path) resetDiffState()
     setFiles(nextFiles)
-    setSelectedIndex((index) => Math.max(0, Math.min(index, nextFiles.length - 1)))
+    setSelectedIndex(nextIndex)
   }
 
   useKeyboard((key) => {
     if (key.name === "q" || (key.ctrl && key.name === "c")) renderer?.destroy()
     if (key.name === "r") refresh()
-    if (key.name === "down" || key.name === "j") {
-      setSelectedIndex((index) => Math.min(files.length - 1, index + 1))
+
+    if (key.name === "escape") {
+      setFocusMode("tree")
+      return
     }
-    if (key.name === "up" || key.name === "k") {
-      setSelectedIndex((index) => Math.max(0, index - 1))
+
+    if (focusMode === "tree") {
+      if ((key.name === "return" || key.name === "enter") && hasPatch) {
+        setFocusMode("diff")
+        return
+      }
+      if (key.name === "down" || key.name === "j") {
+        selectFile(selectedIndex + 1)
+      }
+      if (key.name === "up" || key.name === "k") {
+        selectFile(selectedIndex - 1)
+      }
+      return
+    }
+
+    if (key.name === "down" || key.name === "j") moveDiffCursor(1)
+    if (key.name === "up" || key.name === "k") moveDiffCursor(-1)
+    if (key.name === "pagedown") moveDiffCursor(Math.max(1, (renderer?.terminalHeight ?? 24) - 6))
+    if (key.name === "pageup") moveDiffCursor(-Math.max(1, (renderer?.terminalHeight ?? 24) - 6))
+    if (key.name === "home") {
+      setCurrentDiffLine(0)
+      setDiffScrollY(0)
     }
   })
 
@@ -137,7 +206,7 @@ function App() {
         },
       },
       React.createElement("text", {
-        content: t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)("↑/k ↓/j select • r refresh • q quit")}`,
+        content: t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(focusMode === "tree" ? "tree: ↑/k ↓/j select • enter diff • r refresh • q quit" : `diff: line ${Math.min(currentDiffLine + 1, diffLineCount)}/${diffLineCount} • ↑/k ↓/j move • pgup/pgdn • esc tree • q quit`)}`,
       }),
     ),
     React.createElement(
@@ -151,39 +220,40 @@ function App() {
             flexGrow: 1,
             minWidth: 30,
             border: true,
-            borderColor: theme.borderColor,
-            backgroundColor: theme.backgroundColor,
+            borderColor: focusMode === "diff" ? theme.accent : theme.borderColor,
+            backgroundColor: diffTheme.backgroundColor,
           },
         },
         hasPatch
           ? React.createElement("diff", {
-              diff,
-              view: "unified",
-              filetype: selected ? filetypeForPath(selected.path) : undefined,
-              syntaxStyle,
-              showLineNumbers: true,
-              wrapMode: "none",
-              fg: theme.fg,
-              addedBg: theme.addedBg,
-              removedBg: theme.removedBg,
-              contextBg: theme.contextBg,
-              addedSignColor: theme.addedSignColor,
-              removedSignColor: theme.removedSignColor,
-              lineNumberFg: theme.lineNumberFg,
-              lineNumberBg: theme.lineNumberBg,
-              addedLineNumberBg: theme.addedLineNumberBg,
-              removedLineNumberBg: theme.removedLineNumberBg,
-              selectionBg: theme.selectionBg,
-              selectionFg: theme.selectionFg,
-              style: { flexGrow: 1, flexShrink: 1 },
-            })
+            ref: diffRef,
+            diff,
+            view: "unified",
+            filetype: selected ? pathToFiletype(selected.path) : undefined,
+            syntaxStyle: diffTheme.syntaxStyle,
+            showLineNumbers: true,
+            wrapMode: "none",
+            fg: diffTheme.fg,
+            addedBg: diffTheme.addedBg,
+            removedBg: diffTheme.removedBg,
+            contextBg: diffTheme.contextBg,
+            addedSignColor: diffTheme.addedSignColor,
+            removedSignColor: diffTheme.removedSignColor,
+            lineNumberFg: diffTheme.lineNumberFg,
+            lineNumberBg: diffTheme.lineNumberBg,
+            addedLineNumberBg: diffTheme.addedLineNumberBg,
+            removedLineNumberBg: diffTheme.removedLineNumberBg,
+            selectionBg: diffTheme.selectionBg,
+            selectionFg: diffTheme.selectionFg,
+            style: { flexGrow: 1, flexShrink: 1 },
+          })
           : React.createElement("text", { content: selected ? "No textual diff for this file." : "No changes found." }),
       ),
       React.createElement(
         "scrollbox",
         {
           style: { width: Math.max(28, Math.floor((renderer?.terminalWidth ?? 100) * 0.28)), flexShrink: 0 },
-          rootOptions: { border: true, borderColor: theme.borderColor, backgroundColor: theme.panelColor, title: " Files " },
+          rootOptions: { border: true, borderColor: focusMode === "tree" ? theme.accent : theme.borderColor, backgroundColor: theme.panelColor, title: " Files " },
           viewportOptions: { backgroundColor: theme.panelColor },
           contentOptions: { backgroundColor: theme.panelColor, paddingLeft: 1 },
         },
