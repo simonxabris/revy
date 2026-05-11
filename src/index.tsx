@@ -85,7 +85,8 @@ function App() {
   const [focusMode, setFocusMode] = useState<"tree" | "diff" | "comment">("tree")
   const [diffScrollY, setDiffScrollY] = useState(0)
   const [currentDiffLine, setCurrentDiffLine] = useState(0)
-  const [commentLine, setCommentLine] = useState<number | null>(null)
+  const [selectionAnchorLine, setSelectionAnchorLine] = useState<number | null>(null)
+  const [commentRange, setCommentRange] = useState<{ start: number; end: number } | null>(null)
   const diffRef = useRef<DiffRenderable | null>(null)
   const diffTheme = useMemo(() => shikiThemeToDiffTheme(ayuDark), [])
 
@@ -94,6 +95,12 @@ function App() {
   const hasPatch = diff.startsWith("diff --git") || diff.startsWith("--- ")
   const diffLineTypes = useMemo(() => getDiffLineTypes(diff), [diff])
   const diffLineCount = diffLineTypes.length
+  const selectedRange = selectionAnchorLine === null
+    ? null
+    : {
+      start: Math.min(selectionAnchorLine, currentDiffLine),
+      end: Math.max(selectionAnchorLine, currentDiffLine),
+    }
 
   useEffect(() => {
     const diffRenderable = diffRef.current as unknown as {
@@ -115,18 +122,24 @@ function App() {
       else lineColors.set(index, { gutter: diffTheme.lineNumberBg, content: diffTheme.contextBg })
     })
 
-    if (focusMode === "diff" && diffLineCount > 0) {
+    const highlightedRange = focusMode === "comment" ? commentRange : selectedRange
+    if (highlightedRange) {
+      for (let line = highlightedRange.start; line <= highlightedRange.end; line++) {
+        lineColors.set(line, { gutter: diffTheme.selectionBg, content: diffTheme.selectionBg })
+      }
+    } else if (focusMode === "diff" && diffLineCount > 0) {
       lineColors.set(currentDiffLine, { gutter: diffTheme.activeLineNumberBg, content: diffTheme.activeLineBg })
     }
 
     diffRef.current.setLineColors(lineColors)
     renderer?.requestRender()
-  }, [currentDiffLine, diffLineCount, diffLineTypes, diffTheme, focusMode, hasPatch, renderer])
+  }, [commentRange, currentDiffLine, diffLineCount, diffLineTypes, diffTheme, focusMode, hasPatch, renderer, selectedRange])
 
   function resetDiffState(): void {
     setDiffScrollY(0)
     setCurrentDiffLine(0)
-    setCommentLine(null)
+    setSelectionAnchorLine(null)
+    setCommentRange(null)
     setFocusMode("tree")
   }
 
@@ -136,11 +149,14 @@ function App() {
     setSelectedIndex(clampedIndex)
   }
 
-  function moveDiffCursor(delta: number): void {
+  function moveDiffCursor(delta: number, extendSelection = false): void {
     if (diffLineCount === 0) return
     const viewportHeight = Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
 
     setCurrentDiffLine((line) => {
+      if (extendSelection) setSelectionAnchorLine((anchor) => anchor ?? line)
+      else setSelectionAnchorLine(null)
+
       const nextLine = Math.max(0, Math.min(diffLineCount - 1, line + delta))
       setDiffScrollY((scrollY) => {
         if (nextLine < scrollY) return nextLine
@@ -165,9 +181,10 @@ function App() {
 
     if (key.name === "escape") {
       if (focusMode === "comment") {
-        setCommentLine(null)
+        setCommentRange(null)
         setFocusMode("diff")
       } else {
+        setSelectionAnchorLine(null)
         setFocusMode("tree")
       }
       return
@@ -190,16 +207,17 @@ function App() {
     }
 
     if (key.name === "return" || key.name === "enter") {
-      setCommentLine(currentDiffLine)
+      setCommentRange(selectedRange ?? { start: currentDiffLine, end: currentDiffLine })
       setFocusMode("comment")
       return
     }
 
-    if (key.name === "down" || key.name === "j") moveDiffCursor(1)
-    if (key.name === "up" || key.name === "k") moveDiffCursor(-1)
+    if (key.name === "down" || key.name === "j") moveDiffCursor(1, key.shift)
+    if (key.name === "up" || key.name === "k") moveDiffCursor(-1, key.shift)
     if (key.name === "pagedown") moveDiffCursor(Math.max(1, (renderer?.terminalHeight ?? 24) - 6))
     if (key.name === "pageup") moveDiffCursor(-Math.max(1, (renderer?.terminalHeight ?? 24) - 6))
     if (key.name === "home") {
+      setSelectionAnchorLine(null)
       setCurrentDiffLine(0)
       setDiffScrollY(0)
     }
@@ -209,7 +227,7 @@ function App() {
     ? files.map((file, index) => `${index === selectedIndex ? "›" : " "} ${file.status.padEnd(2)} ${file.path}`).join("\n")
     : "No changes found."
   const diffViewportHeight = Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
-  const commentRow = commentLine === null ? null : commentLine - diffScrollY
+  const commentRow = commentRange === null ? null : commentRange.end - diffScrollY
   const isCommentVisible = commentRow !== null && commentRow >= 0 && commentRow < diffViewportHeight
 
   return (
@@ -227,7 +245,7 @@ function App() {
         }}
       >
         <text
-          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(focusMode === "tree" ? "tree: ↑/k ↓/j select • enter diff • r refresh • q quit" : `diff: line ${Math.min(currentDiffLine + 1, diffLineCount)}/${diffLineCount} • ↑/k ↓/j move • pgup/pgdn • esc tree • q quit`)}`}
+          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(focusMode === "tree" ? "tree: ↑/k ↓/j select • enter diff • r refresh • q quit" : `diff: line ${Math.min(currentDiffLine + 1, diffLineCount)}/${diffLineCount} • ↑/↓ move • shift+↑/↓ select • enter comment • esc tree • q quit`)}`}
         />
       </box>
 
