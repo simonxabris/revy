@@ -37,6 +37,11 @@ function loadDiff(path: string): string {
   return [staged, unstaged].filter(Boolean).join("\n")
 }
 
+function filetypeForDiffPath(path: string): string | undefined {
+  const filetype = pathToFiletype(path)
+  return filetype === "json" ? "javascript" : filetype
+}
+
 type DiffLineType = "add" | "remove" | "context"
 
 function getDiffLineTypes(diff: string): DiffLineType[] {
@@ -229,7 +234,7 @@ function App() {
             ref: diffRef,
             diff,
             view: "unified",
-            filetype: selected ? pathToFiletype(selected.path) : undefined,
+            filetype: selected ? filetypeForDiffPath(selected.path) : undefined,
             syntaxStyle: diffTheme.syntaxStyle,
             showLineNumbers: true,
             wrapMode: "none",
