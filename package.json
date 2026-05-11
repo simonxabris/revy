@@ -3,6 +3,12 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "bin": {
+    "revy": "./src/index.tsx"
+  },
+  "pi": {
+    "extensions": ["./.pi/extensions/revy.ts"]
+  },
   "dependencies": {
     "@openai/codex-sdk": "^0.130.0",
     "@opencode-ai/sdk": "^1.14.48",

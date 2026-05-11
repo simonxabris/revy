@@ -1,6 +1,8 @@
+#!/usr/bin/env bun
 /** @jsxImportSource @opentui/react */
+import { writeFileSync } from "node:fs"
 import { useEffect, useMemo, useRef, useState } from "react"
-import { createCliRenderer, fg, bold, pathToFiletype, t, type DiffRenderable, type TextareaRenderable } from "@opentui/core"
+import { createCliRenderer, fg, bold, pathToFiletype, t, StyledText, type DiffRenderable, type TextareaRenderable, type TextChunk } from "@opentui/core"
 import { createRoot, useKeyboard, useRenderer } from "@opentui/react"
 import { useMachine } from "@xstate/react"
 import nightOwl from 'tm-themes/themes/night-owl.json'
@@ -11,6 +13,63 @@ import { availableAgents, dispatchReviewFix, listProviderModels, type AgentId, t
 interface ChangedFile {
   path: string
   status: string
+}
+
+interface CliOptions {
+  outputPath: string | null
+}
+
+function parseCliOptions(argv: string[]): CliOptions {
+  let outputPath: string | null = null
+
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index]!
+    if (arg === "--output" || arg === "-o") {
+      outputPath = argv[++index] ?? null
+      continue
+    }
+    if (arg.startsWith("--output=")) {
+      outputPath = arg.slice("--output=".length)
+      continue
+    }
+    if (arg === "--help" || arg === "-h") {
+      console.log("Usage: revy [--output <comments.json>]")
+      process.exit(0)
+    }
+  }
+
+  return { outputPath }
+}
+
+const cliOptions = parseCliOptions(Bun.argv.slice(2))
+
+function collectReviewComments(commentsByFile: Record<string, ReviewComment[]>): Array<Omit<ReviewComment, "createdAt"> & { createdAt: string }> {
+  return Object.values(commentsByFile)
+    .flat()
+    .sort((a, b) => a.filePath.localeCompare(b.filePath) || a.diffStartLine - b.diffStartLine || a.createdAt - b.createdAt)
+    .map((comment) => ({
+      id: comment.id,
+      filePath: comment.filePath,
+      diffStartLine: comment.diffStartLine,
+      diffEndLine: comment.diffEndLine,
+      body: comment.body,
+      createdAt: new Date(comment.createdAt).toISOString(),
+    }))
+}
+
+function writeReviewComments(outputPath: string, commentsByFile: Record<string, ReviewComment[]>): void {
+  writeFileSync(
+    outputPath,
+    JSON.stringify(
+      {
+        version: 1,
+        repoRoot: process.cwd(),
+        comments: collectReviewComments(commentsByFile),
+      },
+      null,
+      2,
+    ) + "\n",
+  )
 }
 
 function git(args: string[]): string {
@@ -98,6 +157,7 @@ const theme = {
   contextBg: "#0d1117",
   addedSignColor: "#3fb950",
   removedSignColor: "#f85149",
+  modifiedSignColor: "#d29922",
   lineNumberFg: "#6e7681",
   lineNumberBg: "#161b22",
   addedLineNumberBg: "#183a24",
@@ -106,11 +166,31 @@ const theme = {
   selectionFg: "#ffffff",
 }
 
+function filenameColorForStatus(status: string): string {
+  if (status === "??" || status.includes("A")) return theme.addedSignColor
+  if (status.includes("D")) return theme.removedSignColor
+  return theme.modifiedSignColor
+}
+
+function renderFileTree(files: ChangedFile[], selectedIndex: number, emptyMessage = "No changes found."): StyledText | string {
+  if (files.length === 0) return emptyMessage
+
+  const chunks: TextChunk[] = []
+  files.forEach((file, index) => {
+    const fileColor = filenameColorForStatus(file.status)
+    chunks.push({ __isChunk: true, text: `${index === selectedIndex ? "›" : " "} ` })
+    chunks.push(fg(fileColor)(`${file.status.padEnd(2)} `))
+    chunks.push(fg(fileColor)(file.path))
+    if (index < files.length - 1) chunks.push({ __isChunk: true, text: "\n" })
+  })
+  return new StyledText(chunks)
+}
 
 function App() {
   const renderer = useRenderer()
   const [files, setFiles] = useState<ChangedFile[]>(() => loadChangedFiles())
   const [selectedIndex, setSelectedIndex] = useState(0)
+  const [fileSearchQuery, setFileSearchQuery] = useState("")
   const [focusMode, setFocusMode] = useState<"tree" | "diff" | "comment" | "agent">("tree")
   const [diffScrollY, setDiffScrollY] = useState(0)
   const [currentDiffLine, setCurrentDiffLine] = useState(0)
@@ -123,13 +203,31 @@ function App() {
   const [agentRunStatus, setAgentRunStatus] = useState<"idle" | "running" | "done" | "error">("idle")
   const [agentRunMessage, setAgentRunMessage] = useState<string | null>(null)
   const [reviewState, sendReview] = useMachine(reviewMachine)
+  const commentsByFileRef = useRef(reviewState.context.commentsByFile)
   const diffRef = useRef<DiffRenderable | null>(null)
   const commentTextareaRef = useRef<TextareaRenderable | null>(null)
   const diffTheme = useMemo(() => shikiThemeToDiffTheme(nightOwl as any), [])
   const isDraftingComment = reviewState.matches("draftingComment")
   const activeDraft = reviewState.context.draft
 
-  const selected = files[selectedIndex]
+  commentsByFileRef.current = reviewState.context.commentsByFile
+
+  useEffect(() => {
+    ;(globalThis as typeof globalThis & { __revyGetCommentsByFile?: () => Record<string, ReviewComment[]> }).__revyGetCommentsByFile = () => commentsByFileRef.current
+    return () => {
+      delete (globalThis as typeof globalThis & { __revyGetCommentsByFile?: () => Record<string, ReviewComment[]> }).__revyGetCommentsByFile
+    }
+  }, [])
+
+  const visibleFiles = useMemo(
+    () => files.filter((file) => fuzzyMatches(`${file.status} ${file.path}`, fileSearchQuery)),
+    [files, fileSearchQuery],
+  )
+  useEffect(() => {
+    if (selectedIndex >= visibleFiles.length) setSelectedIndex(Math.max(0, visibleFiles.length - 1))
+  }, [selectedIndex, visibleFiles.length])
+
+  const selected = visibleFiles[selectedIndex]
   const diff = selected ? loadDiff(selected) : ""
   const hasPatch = diff.startsWith("diff --git") || diff.startsWith("--- ")
   const diffLineTypes = useMemo(() => getDiffLineTypes(diff), [diff])
@@ -193,8 +291,8 @@ function App() {
   }
 
   function selectFile(nextIndex: number): void {
-    const clampedIndex = Math.max(0, Math.min(files.length - 1, nextIndex))
-    if (files[clampedIndex]?.path !== selected?.path) resetDiffState()
+    const clampedIndex = Math.max(0, Math.min(visibleFiles.length - 1, nextIndex))
+    if (visibleFiles[clampedIndex]?.path !== selected?.path) resetDiffState()
     setSelectedIndex(clampedIndex)
   }
 
@@ -285,8 +383,9 @@ function App() {
 
   function refresh(): void {
     const nextFiles = loadChangedFiles()
-    const nextIndex = Math.max(0, Math.min(selectedIndex, nextFiles.length - 1))
-    if (nextFiles[nextIndex]?.path !== selected?.path) resetDiffState()
+    const nextVisibleFiles = nextFiles.filter((file) => fuzzyMatches(`${file.status} ${file.path}`, fileSearchQuery))
+    const nextIndex = Math.max(0, Math.min(selectedIndex, nextVisibleFiles.length - 1))
+    if (nextVisibleFiles[nextIndex]?.path !== selected?.path) resetDiffState()
     setFiles(nextFiles)
     setSelectedIndex(nextIndex)
   }
@@ -357,11 +456,30 @@ function App() {
         setFocusMode("diff")
         return
       }
+      if (key.name === "backspace") {
+        setFileSearchQuery((query) => query.slice(0, -1))
+        setSelectedIndex(0)
+        resetDiffState()
+        return
+      }
+      if (key.ctrl && key.name === "u") {
+        setFileSearchQuery("")
+        setSelectedIndex(0)
+        resetDiffState()
+        return
+      }
       if (key.name === "down" || key.name === "j") {
         selectFile(selectedIndex + 1)
+        return
       }
       if (key.name === "up" || key.name === "k") {
         selectFile(selectedIndex - 1)
+        return
+      }
+      if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
+        setFileSearchQuery((query) => query + key.sequence)
+        setSelectedIndex(0)
+        resetDiffState()
       }
       return
     }
@@ -390,9 +508,7 @@ function App() {
     }
   })
 
-  const tree = files.length
-    ? files.map((file, index) => `${index === selectedIndex ? "›" : " "} ${file.status.padEnd(2)} ${file.path}`).join("\n")
-    : "No changes found."
+  const tree = renderFileTree(visibleFiles, selectedIndex, files.length === 0 ? "No changes found." : "No matching files.")
   const diffViewportHeight = Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
   const commentRow = activeDraft === null || activeDraft.filePath !== selected?.path ? null : activeDraft.diffEndLine - diffScrollY
   const isCommentVisible = commentRow !== null && commentRow >= 0 && commentRow < diffViewportHeight
@@ -432,7 +548,7 @@ function App() {
         }}
       >
         <text
-          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : focusMode === "agent" ? "agent: ↑/↓ choose • enter run • esc cancel" : focusMode === "tree" ? "tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit" : `diff: line ${Math.min(currentDiffLine + 1, diffLineCount)}/${diffLineCount} • ↑/↓ move • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
+          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : focusMode === "agent" ? "agent: ↑/↓ choose • enter run • esc cancel" : focusMode === "tree" ? `tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit${cliOptions.outputPath ? " • writes comments on quit" : ""}` : `diff: line ${Math.min(currentDiffLine + 1, diffLineCount)}/${diffLineCount} • ↑/↓ move • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
         />
       </box>
 
@@ -539,14 +655,37 @@ function App() {
           )}
         </box>
 
-        <scrollbox
-          style={{ width: Math.max(28, Math.floor((renderer?.terminalWidth ?? 100) * 0.28)), flexShrink: 0 }}
-          rootOptions={{ border: true, borderColor: focusMode === "tree" ? theme.accent : theme.borderColor, backgroundColor: theme.panelColor, title: " Files " }}
-          viewportOptions={{ backgroundColor: theme.panelColor }}
-          contentOptions={{ backgroundColor: theme.panelColor, paddingLeft: 1 }}
+        <box
+          style={{
+            width: Math.max(28, Math.floor((renderer?.terminalWidth ?? 100) * 0.28)),
+            flexShrink: 0,
+            flexDirection: "column",
+            backgroundColor: theme.panelColor,
+          }}
         >
-          <text content={tree} />
-        </scrollbox>
+          <box
+            title=" Search files "
+            style={{
+              height: 3,
+              flexShrink: 0,
+              border: true,
+              borderColor: focusMode === "tree" ? theme.accent : theme.borderColor,
+              backgroundColor: theme.panelColor,
+              paddingLeft: 1,
+              alignItems: "center",
+            }}
+          >
+            <text content={fileSearchQuery ? t`${fileSearchQuery}${fg(theme.muted)("_")}` : t`${fg(theme.muted)("Type to filter files")}`} />
+          </box>
+          <scrollbox
+            style={{ flexGrow: 1, flexShrink: 1 }}
+            rootOptions={{ border: true, borderColor: focusMode === "tree" ? theme.accent : theme.borderColor, backgroundColor: theme.panelColor, title: ` Files ${visibleFiles.length}/${files.length} ` }}
+            viewportOptions={{ backgroundColor: theme.panelColor }}
+            contentOptions={{ backgroundColor: theme.panelColor, paddingLeft: 1 }}
+          >
+            <text content={tree} />
+          </scrollbox>
+        </box>
       </box>
 
       {focusMode === "agent" ? (
@@ -611,7 +750,19 @@ function App() {
 
 try {
   git(["rev-parse", "--is-inside-work-tree"])
-  const renderer = await createCliRenderer({ exitOnCtrlC: true })
+  const renderer = await createCliRenderer({
+    exitOnCtrlC: true,
+    onDestroy: () => {
+      if (!cliOptions.outputPath) return
+      const getCommentsByFile = (globalThis as typeof globalThis & { __revyGetCommentsByFile?: () => Record<string, ReviewComment[]> }).__revyGetCommentsByFile
+      const commentsByFile = getCommentsByFile?.() ?? {}
+      try {
+        writeReviewComments(cliOptions.outputPath, commentsByFile)
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : String(error))
+      }
+    },
+  })
   renderer.setBackgroundColor(theme.backgroundColor)
   createRoot(renderer).render(<App />)
 } catch (error) {
