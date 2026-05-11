@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from "react"
+/** @jsxImportSource @opentui/react */
+import { useEffect, useMemo, useRef, useState } from "react"
 import { createCliRenderer, fg, bold, pathToFiletype, t, type DiffRenderable } from "@opentui/core"
 import { createRoot, useKeyboard, useRenderer } from "@opentui/react"
 import ayuDark from 'tm-themes/themes/ayu-dark.json'
@@ -81,9 +82,10 @@ function App() {
   const renderer = useRenderer()
   const [files, setFiles] = useState<ChangedFile[]>(() => loadChangedFiles())
   const [selectedIndex, setSelectedIndex] = useState(0)
-  const [focusMode, setFocusMode] = useState<"tree" | "diff">("tree")
+  const [focusMode, setFocusMode] = useState<"tree" | "diff" | "comment">("tree")
   const [diffScrollY, setDiffScrollY] = useState(0)
   const [currentDiffLine, setCurrentDiffLine] = useState(0)
+  const [commentLine, setCommentLine] = useState<number | null>(null)
   const diffRef = useRef<DiffRenderable | null>(null)
   const diffTheme = useMemo(() => shikiThemeToDiffTheme(ayuDark), [])
 
@@ -124,6 +126,7 @@ function App() {
   function resetDiffState(): void {
     setDiffScrollY(0)
     setCurrentDiffLine(0)
+    setCommentLine(null)
     setFocusMode("tree")
   }
 
@@ -161,9 +164,16 @@ function App() {
     if (key.name === "r") refresh()
 
     if (key.name === "escape") {
-      setFocusMode("tree")
+      if (focusMode === "comment") {
+        setCommentLine(null)
+        setFocusMode("diff")
+      } else {
+        setFocusMode("tree")
+      }
       return
     }
+
+    if (focusMode === "comment") return
 
     if (focusMode === "tree") {
       if ((key.name === "return" || key.name === "enter") && hasPatch) {
@@ -176,6 +186,12 @@ function App() {
       if (key.name === "up" || key.name === "k") {
         selectFile(selectedIndex - 1)
       }
+      return
+    }
+
+    if (key.name === "return" || key.name === "enter") {
+      setCommentLine(currentDiffLine)
+      setFocusMode("comment")
       return
     }
 
@@ -192,15 +208,15 @@ function App() {
   const tree = files.length
     ? files.map((file, index) => `${index === selectedIndex ? "›" : " "} ${file.status.padEnd(2)} ${file.path}`).join("\n")
     : "No changes found."
+  const diffViewportHeight = Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
+  const commentRow = commentLine === null ? null : commentLine - diffScrollY
+  const isCommentVisible = commentRow !== null && commentRow >= 0 && commentRow < diffViewportHeight
 
-  return React.createElement(
-    "box",
-    { style: { width: "100%", height: "100%", flexDirection: "column", backgroundColor: theme.backgroundColor } },
-    React.createElement(
-      "box",
-      {
-        title: " revy ",
-        style: {
+  return (
+    <box style={{ width: "100%", height: "100%", flexDirection: "column", backgroundColor: theme.backgroundColor }}>
+      <box
+        title=" revy "
+        style={{
           height: 3,
           flexShrink: 0,
           border: true,
@@ -208,63 +224,91 @@ function App() {
           backgroundColor: theme.panelColor,
           paddingLeft: 1,
           alignItems: "center",
-        },
-      },
-      React.createElement("text", {
-        content: t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(focusMode === "tree" ? "tree: ↑/k ↓/j select • enter diff • r refresh • q quit" : `diff: line ${Math.min(currentDiffLine + 1, diffLineCount)}/${diffLineCount} • ↑/k ↓/j move • pgup/pgdn • esc tree • q quit`)}`,
-      }),
-    ),
-    React.createElement(
-      "box",
-      { style: { flexGrow: 1, flexDirection: "row", backgroundColor: theme.backgroundColor } },
-      React.createElement(
-        "box",
-        {
-          title: selected ? ` Diff: ${selected.path} ` : " Diff ",
-          style: {
+        }}
+      >
+        <text
+          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(focusMode === "tree" ? "tree: ↑/k ↓/j select • enter diff • r refresh • q quit" : `diff: line ${Math.min(currentDiffLine + 1, diffLineCount)}/${diffLineCount} • ↑/k ↓/j move • pgup/pgdn • esc tree • q quit`)}`}
+        />
+      </box>
+
+      <box style={{ flexGrow: 1, flexDirection: "row", backgroundColor: theme.backgroundColor }}>
+        <box
+          title={selected ? ` Diff: ${selected.path} ` : " Diff "}
+          style={{
             flexGrow: 1,
             minWidth: 30,
             border: true,
             borderColor: focusMode === "diff" ? theme.accent : theme.borderColor,
             backgroundColor: diffTheme.backgroundColor,
-          },
-        },
-        hasPatch
-          ? React.createElement("diff", {
-            ref: diffRef,
-            diff,
-            view: "unified",
-            filetype: selected ? filetypeForDiffPath(selected.path) : undefined,
-            syntaxStyle: diffTheme.syntaxStyle,
-            showLineNumbers: true,
-            wrapMode: "none",
-            fg: diffTheme.fg,
-            addedBg: diffTheme.addedBg,
-            removedBg: diffTheme.removedBg,
-            contextBg: diffTheme.contextBg,
-            addedSignColor: diffTheme.addedSignColor,
-            removedSignColor: diffTheme.removedSignColor,
-            lineNumberFg: diffTheme.lineNumberFg,
-            lineNumberBg: diffTheme.lineNumberBg,
-            addedLineNumberBg: diffTheme.addedLineNumberBg,
-            removedLineNumberBg: diffTheme.removedLineNumberBg,
-            selectionBg: diffTheme.selectionBg,
-            selectionFg: diffTheme.selectionFg,
-            style: { flexGrow: 1, flexShrink: 1 },
-          })
-          : React.createElement("text", { content: selected ? "No textual diff for this file." : "No changes found." }),
-      ),
-      React.createElement(
-        "scrollbox",
-        {
-          style: { width: Math.max(28, Math.floor((renderer?.terminalWidth ?? 100) * 0.28)), flexShrink: 0 },
-          rootOptions: { border: true, borderColor: focusMode === "tree" ? theme.accent : theme.borderColor, backgroundColor: theme.panelColor, title: " Files " },
-          viewportOptions: { backgroundColor: theme.panelColor },
-          contentOptions: { backgroundColor: theme.panelColor, paddingLeft: 1 },
-        },
-        React.createElement("text", { content: tree }),
-      ),
-    ),
+          }}
+        >
+          {hasPatch ? (
+            <>
+              <diff
+                ref={diffRef}
+                diff={diff}
+                view="unified"
+                filetype={selected ? filetypeForDiffPath(selected.path) : undefined}
+                syntaxStyle={diffTheme.syntaxStyle}
+                showLineNumbers={true}
+                wrapMode="none"
+                fg={diffTheme.fg}
+                addedBg={diffTheme.addedBg}
+                removedBg={diffTheme.removedBg}
+                contextBg={diffTheme.contextBg}
+                addedSignColor={diffTheme.addedSignColor}
+                removedSignColor={diffTheme.removedSignColor}
+                lineNumberFg={diffTheme.lineNumberFg}
+                lineNumberBg={diffTheme.lineNumberBg}
+                addedLineNumberBg={diffTheme.addedLineNumberBg}
+                removedLineNumberBg={diffTheme.removedLineNumberBg}
+                selectionBg={diffTheme.selectionBg}
+                selectionFg={diffTheme.selectionFg}
+                style={{ flexGrow: 1, flexShrink: 1 }}
+              />
+
+              {isCommentVisible ? (
+                <box
+                  title=" Comment "
+                  style={{
+                    position: "absolute",
+                    top: Math.min((commentRow ?? 0) + 1, Math.max(1, diffViewportHeight - 9)),
+                    left: 8,
+                    right: 2,
+                    height: 10,
+                    zIndex: 10,
+                    border: true,
+                    borderColor: theme.accent,
+                    backgroundColor: theme.panelColor,
+                  }}
+                >
+                  <textarea
+                    focused={focusMode === "comment"}
+                    placeholder="Write a comment... (esc closes)"
+                    backgroundColor={theme.panelColor}
+                    textColor={theme.fg}
+                    focusedBackgroundColor={theme.panelColor}
+                    focusedTextColor={theme.fg}
+                    style={{ flexGrow: 1, paddingLeft: 1, paddingRight: 1 }}
+                  />
+                </box>
+              ) : null}
+            </>
+          ) : (
+            <text content={selected ? "No textual diff for this file." : "No changes found."} />
+          )}
+        </box>
+
+        <scrollbox
+          style={{ width: Math.max(28, Math.floor((renderer?.terminalWidth ?? 100) * 0.28)), flexShrink: 0 }}
+          rootOptions={{ border: true, borderColor: focusMode === "tree" ? theme.accent : theme.borderColor, backgroundColor: theme.panelColor, title: " Files " }}
+          viewportOptions={{ backgroundColor: theme.panelColor }}
+          contentOptions={{ backgroundColor: theme.panelColor, paddingLeft: 1 }}
+        >
+          <text content={tree} />
+        </scrollbox>
+      </box>
+    </box>
   )
 }
 
@@ -272,7 +316,7 @@ try {
   git(["rev-parse", "--is-inside-work-tree"])
   const renderer = await createCliRenderer({ exitOnCtrlC: true })
   renderer.setBackgroundColor(theme.backgroundColor)
-  createRoot(renderer).render(React.createElement(App))
+  createRoot(renderer).render(<App />)
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error))
   process.exit(1)
