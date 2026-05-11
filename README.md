@@ -1,27 +1,8 @@
-# revy
+# Revy
 
-To install dependencies:
+Revy is a review TUI that lets you review your code locally like a github PR and then dispath an AI agent to implement the changes.
 
-```bash
-bun install
-```
-
-To run:
-
-```bash
-bun run src/index.tsx
-```
+It also includes a Pi extension where you can invoke the tui from pi with the /revy command, do the review, exit and pipe your comments back into the pi session.
 
 To export comments for another tool instead of dispatching an agent from Revy:
 
-```bash
-revy --output /tmp/revy-comments.json
-```
-
-The bundled Pi extension registers `/brevy`. It launches Revy, lets you add comments, then inserts those comments into the current Pi prompt editor when Revy exits. You can override the launch command with `REVY_COMMAND`, for example:
-
-```bash
-REVY_COMMAND="bun run /path/to/revy/src/index.tsx" pi
-```
-
-This project was created using `bun init` in bun v1.3.13. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.

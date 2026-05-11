@@ -223,11 +223,8 @@ function App() {
     () => files.filter((file) => fuzzyMatches(`${file.status} ${file.path}`, fileSearchQuery)),
     [files, fileSearchQuery],
   )
-  useEffect(() => {
-    if (selectedIndex >= visibleFiles.length) setSelectedIndex(Math.max(0, visibleFiles.length - 1))
-  }, [selectedIndex, visibleFiles.length])
-
-  const selected = visibleFiles[selectedIndex]
+  const effectiveSelectedIndex = Math.max(0, Math.min(selectedIndex, visibleFiles.length - 1))
+  const selected = visibleFiles[effectiveSelectedIndex]
   const diff = selected ? loadDiff(selected) : ""
   const hasPatch = diff.startsWith("diff --git") || diff.startsWith("--- ")
   const diffLineTypes = useMemo(() => getDiffLineTypes(diff), [diff])
@@ -343,7 +340,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [focusMode])
+  }, [agentOptionsStatus, focusMode])
 
   async function runFixAgent(option: AgentProviderModelOption): Promise<void> {
     const comments = Object.values(reviewState.context.commentsByFile).flat().map((comment) => ({
@@ -384,7 +381,7 @@ function App() {
   function refresh(): void {
     const nextFiles = loadChangedFiles()
     const nextVisibleFiles = nextFiles.filter((file) => fuzzyMatches(`${file.status} ${file.path}`, fileSearchQuery))
-    const nextIndex = Math.max(0, Math.min(selectedIndex, nextVisibleFiles.length - 1))
+    const nextIndex = Math.max(0, Math.min(effectiveSelectedIndex, nextVisibleFiles.length - 1))
     if (nextVisibleFiles[nextIndex]?.path !== selected?.path) resetDiffState()
     setFiles(nextFiles)
     setSelectedIndex(nextIndex)
@@ -469,11 +466,11 @@ function App() {
         return
       }
       if (key.name === "down" || key.name === "j") {
-        selectFile(selectedIndex + 1)
+        selectFile(effectiveSelectedIndex + 1)
         return
       }
       if (key.name === "up" || key.name === "k") {
-        selectFile(selectedIndex - 1)
+        selectFile(effectiveSelectedIndex - 1)
         return
       }
       if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
@@ -508,7 +505,7 @@ function App() {
     }
   })
 
-  const tree = renderFileTree(visibleFiles, selectedIndex, files.length === 0 ? "No changes found." : "No matching files.")
+  const tree = renderFileTree(visibleFiles, effectiveSelectedIndex, files.length === 0 ? "No changes found." : "No matching files.")
   const diffViewportHeight = Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
   const commentRow = activeDraft === null || activeDraft.filePath !== selected?.path ? null : activeDraft.diffEndLine - diffScrollY
   const isCommentVisible = commentRow !== null && commentRow >= 0 && commentRow < diffViewportHeight
