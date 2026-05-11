@@ -1,9 +1,11 @@
 /** @jsxImportSource @opentui/react */
 import { useEffect, useMemo, useRef, useState } from "react"
-import { createCliRenderer, fg, bold, pathToFiletype, t, type DiffRenderable } from "@opentui/core"
+import { createCliRenderer, fg, bold, pathToFiletype, t, type DiffRenderable, type TextareaRenderable } from "@opentui/core"
 import { createRoot, useKeyboard, useRenderer } from "@opentui/react"
-import ayuDark from 'tm-themes/themes/ayu-dark.json'
+import { useMachine } from "@xstate/react"
+import nightOwl from 'tm-themes/themes/night-owl.json'
 import { shikiThemeToDiffTheme } from "./theme-mapper"
+import { reviewMachine, type ReviewComment } from "./review-machine"
 
 interface ChangedFile {
   path: string
@@ -86,9 +88,12 @@ function App() {
   const [diffScrollY, setDiffScrollY] = useState(0)
   const [currentDiffLine, setCurrentDiffLine] = useState(0)
   const [selectionAnchorLine, setSelectionAnchorLine] = useState<number | null>(null)
-  const [commentRange, setCommentRange] = useState<{ start: number; end: number } | null>(null)
+  const [reviewState, sendReview] = useMachine(reviewMachine)
   const diffRef = useRef<DiffRenderable | null>(null)
-  const diffTheme = useMemo(() => shikiThemeToDiffTheme(ayuDark), [])
+  const commentTextareaRef = useRef<TextareaRenderable | null>(null)
+  const diffTheme = useMemo(() => shikiThemeToDiffTheme(nightOwl as any), [])
+  const isDraftingComment = reviewState.matches("draftingComment")
+  const activeDraft = reviewState.context.draft
 
   const selected = files[selectedIndex]
   const diff = selected ? loadDiff(selected.path) : ""
@@ -122,7 +127,18 @@ function App() {
       else lineColors.set(index, { gutter: diffTheme.lineNumberBg, content: diffTheme.contextBg })
     })
 
-    const highlightedRange = focusMode === "comment" ? commentRange : selectedRange
+    const draftRange = activeDraft && activeDraft.filePath === selected?.path
+      ? { start: activeDraft.diffStartLine, end: activeDraft.diffEndLine }
+      : null
+    const highlightedRange = isDraftingComment ? draftRange : selectedRange
+    const commentsForSelectedFile = selected ? reviewState.context.commentsByFile[selected.path] ?? [] : []
+    for (const comment of commentsForSelectedFile) {
+      for (let line = comment.diffStartLine; line <= comment.diffEndLine; line++) {
+        const existing = lineColors.get(line)
+        lineColors.set(line, { gutter: "#d29922", content: existing?.content ?? diffTheme.contextBg })
+      }
+    }
+
     if (highlightedRange) {
       for (let line = highlightedRange.start; line <= highlightedRange.end; line++) {
         lineColors.set(line, { gutter: diffTheme.selectionBg, content: diffTheme.selectionBg })
@@ -133,13 +149,12 @@ function App() {
 
     diffRef.current.setLineColors(lineColors)
     renderer?.requestRender()
-  }, [commentRange, currentDiffLine, diffLineCount, diffLineTypes, diffTheme, focusMode, hasPatch, renderer, selectedRange])
+  }, [activeDraft, currentDiffLine, diffLineCount, diffLineTypes, diffTheme, focusMode, hasPatch, isDraftingComment, renderer, reviewState.context.commentsByFile, selected, selectedRange])
 
   function resetDiffState(): void {
     setDiffScrollY(0)
     setCurrentDiffLine(0)
     setSelectionAnchorLine(null)
-    setCommentRange(null)
     setFocusMode("tree")
   }
 
@@ -167,6 +182,12 @@ function App() {
     })
   }
 
+  function findCommentForLine(filePath: string, line: number): ReviewComment | undefined {
+    return (reviewState.context.commentsByFile[filePath] ?? []).find(
+      (comment) => line >= comment.diffStartLine && line <= comment.diffEndLine,
+    )
+  }
+
   function refresh(): void {
     const nextFiles = loadChangedFiles()
     const nextIndex = Math.max(0, Math.min(selectedIndex, nextFiles.length - 1))
@@ -180,8 +201,8 @@ function App() {
     if (key.name === "r") refresh()
 
     if (key.name === "escape") {
-      if (focusMode === "comment") {
-        setCommentRange(null)
+      if (isDraftingComment) {
+        sendReview({ type: "comment.cancel" })
         setFocusMode("diff")
       } else {
         setSelectionAnchorLine(null)
@@ -190,7 +211,7 @@ function App() {
       return
     }
 
-    if (focusMode === "comment") return
+    if (isDraftingComment) return
 
     if (focusMode === "tree") {
       if ((key.name === "return" || key.name === "enter") && hasPatch) {
@@ -207,7 +228,14 @@ function App() {
     }
 
     if (key.name === "return" || key.name === "enter") {
-      setCommentRange(selectedRange ?? { start: currentDiffLine, end: currentDiffLine })
+      if (!selected) return
+      const existingComment = findCommentForLine(selected.path, currentDiffLine)
+      if (existingComment) {
+        sendReview({ type: "comment.edit", comment: existingComment })
+      } else {
+        const range = selectedRange ?? { start: currentDiffLine, end: currentDiffLine }
+        sendReview({ type: "comment.start", filePath: selected.path, startLine: range.start, endLine: range.end })
+      }
       setFocusMode("comment")
       return
     }
@@ -227,7 +255,7 @@ function App() {
     ? files.map((file, index) => `${index === selectedIndex ? "›" : " "} ${file.status.padEnd(2)} ${file.path}`).join("\n")
     : "No changes found."
   const diffViewportHeight = Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
-  const commentRow = commentRange === null ? null : commentRange.end - diffScrollY
+  const commentRow = activeDraft === null || activeDraft.filePath !== selected?.path ? null : activeDraft.diffEndLine - diffScrollY
   const isCommentVisible = commentRow !== null && commentRow >= 0 && commentRow < diffViewportHeight
 
   return (
@@ -301,12 +329,27 @@ function App() {
                   }}
                 >
                   <textarea
-                    focused={focusMode === "comment"}
-                    placeholder="Write a comment... (esc closes)"
+                    ref={commentTextareaRef}
+                    key={activeDraft?.commentId ?? `${activeDraft?.filePath}:${activeDraft?.diffStartLine}:${activeDraft?.diffEndLine}`}
+                    focused={isDraftingComment}
+                    initialValue={activeDraft?.body ?? ""}
+                    placeholder="Write a comment... (ctrl+enter saves, esc cancels)"
+                    keyBindings={[
+                      { name: "return", ctrl: true, action: "submit" },
+                      { name: "enter", ctrl: true, action: "submit" },
+                    ]}
                     backgroundColor={theme.panelColor}
                     textColor={theme.fg}
                     focusedBackgroundColor={theme.panelColor}
                     focusedTextColor={theme.fg}
+                    onContentChange={() => {
+                      sendReview({ type: "comment.updateDraft", body: commentTextareaRef.current?.plainText ?? "" })
+                    }}
+                    onSubmit={() => {
+                      sendReview({ type: "comment.updateDraft", body: commentTextareaRef.current?.plainText ?? "" })
+                      sendReview({ type: "comment.save" })
+                      setFocusMode("diff")
+                    }}
                     style={{ flexGrow: 1, paddingLeft: 1, paddingRight: 1 }}
                   />
                 </box>

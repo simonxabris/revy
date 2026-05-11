@@ -6,9 +6,11 @@
   "dependencies": {
     "@opentui/core": "^0.2.6",
     "@opentui/react": "^0.2.6",
+    "@xstate/react": "^6.1.0",
     "react": ">=19.2.0",
     "react-reconciler": "^0.33.0",
-    "tm-themes": "^1.12.2"
+    "tm-themes": "^1.12.2",
+    "xstate": "^5.31.1"
   },
   "devDependencies": {
     "@types/bun": "latest",
