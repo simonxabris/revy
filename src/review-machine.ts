@@ -52,6 +52,7 @@ export type ReviewEvent =
   | DeleteCommentEvent
   | { type: "comment.save" }
   | { type: "comment.cancel" }
+  | { type: "review.reset" }
 
 export const reviewMachine = createMachine({
   types: {} as {
@@ -67,6 +68,12 @@ export const reviewMachine = createMachine({
   states: {
     reading: {
       on: {
+        "review.reset": {
+          actions: assign({
+            commentsByFile: {},
+            draft: null,
+          }),
+        },
         "comment.start": {
           target: "draftingComment",
           actions: assign({
@@ -105,6 +112,13 @@ export const reviewMachine = createMachine({
     },
     draftingComment: {
       on: {
+        "review.reset": {
+          target: "reading",
+          actions: assign({
+            commentsByFile: {},
+            draft: null,
+          }),
+        },
         "comment.updateDraft": {
           actions: assign({
             draft: ({ context, event }) =>

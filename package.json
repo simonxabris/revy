@@ -4,6 +4,8 @@
   "type": "module",
   "private": true,
   "dependencies": {
+    "@openai/codex-sdk": "^0.130.0",
+    "@opencode-ai/sdk": "^1.14.48",
     "@opentui/core": "^0.2.6",
     "@opentui/react": "^0.2.6",
     "@xstate/react": "^6.1.0",
