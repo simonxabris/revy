@@ -1,24 +1,24 @@
 import { SyntaxStyle, type StyleDefinitionInput } from "@opentui/core"
 
-type ShikiFontStyle = string | number
+type TextMateFontStyle = string | number
 
-interface ShikiTokenSettings {
-  foreground?: string
-  background?: string
-  fontStyle?: ShikiFontStyle
+interface TextMateTokenSettings {
+  readonly foreground?: string
+  readonly background?: string
+  readonly fontStyle?: TextMateFontStyle
 }
 
-interface ShikiTokenStyle {
-  scope?: string | string[]
-  settings?: ShikiTokenSettings
+interface TextMateTokenStyle {
+  readonly scope?: string | readonly string[]
+  readonly settings?: TextMateTokenSettings
 }
 
-export interface ShikiTheme {
-  fg?: string
-  bg?: string
-  colors?: Record<string, string>
-  settings?: ShikiTokenStyle[]
-  tokenColors?: ShikiTokenStyle[]
+export interface TextMateTheme {
+  readonly fg?: string
+  readonly bg?: string
+  readonly colors?: Record<string, string | null>
+  readonly settings?: readonly TextMateTokenStyle[]
+  readonly tokenColors?: readonly TextMateTokenStyle[]
 }
 
 export interface OpenTuiDiffTheme {
@@ -65,7 +65,7 @@ const textMateScopeMap: Array<[string, string[]]> = [
   ["variable", ["variable"]],
 ]
 
-function shikiThemeToOpenTuiStyles(theme: ShikiTheme): Record<string, StyleDefinitionInput> {
+function textMateThemeToOpenTuiStyles(theme: TextMateTheme): Record<string, StyleDefinitionInput> {
   const styles: Record<string, StyleDefinitionInput> = {}
   const tokenStyles = theme.settings ?? theme.tokenColors ?? []
 
@@ -94,11 +94,11 @@ function shikiThemeToOpenTuiStyles(theme: ShikiTheme): Record<string, StyleDefin
   return styles
 }
 
-export function shikiThemeToSyntaxStyle(theme: ShikiTheme): SyntaxStyle {
-  return SyntaxStyle.fromStyles(shikiThemeToOpenTuiStyles(theme))
+export function textMateThemeToSyntaxStyle(theme: TextMateTheme): SyntaxStyle {
+  return SyntaxStyle.fromStyles(textMateThemeToOpenTuiStyles(theme))
 }
 
-export function shikiThemeToDiffTheme(theme: ShikiTheme): OpenTuiDiffTheme {
+export function textMateThemeToDiffTheme(theme: TextMateTheme): OpenTuiDiffTheme {
   const colors = theme.colors ?? {}
   const backgroundColor = blendColor(colors["editor.background"] ?? theme.bg ?? "#0d1117", "#ffffff")
   const fg = blendColor(colors["editor.foreground"] ?? colors.foreground ?? theme.fg ?? "#e6edf3", backgroundColor)
@@ -106,7 +106,7 @@ export function shikiThemeToDiffTheme(theme: ShikiTheme): OpenTuiDiffTheme {
   const removedSignColor = blendColor(colors["editorGutter.deletedBackground"] ?? "#f85149", backgroundColor)
 
   return {
-    syntaxStyle: shikiThemeToSyntaxStyle(theme),
+    syntaxStyle: textMateThemeToSyntaxStyle(theme),
     backgroundColor,
     fg,
     addedBg: blendColor(colors["diffEditor.insertedTextBackground"] ?? "#1f3d2b", backgroundColor),
@@ -125,8 +125,8 @@ export function shikiThemeToDiffTheme(theme: ShikiTheme): OpenTuiDiffTheme {
   }
 }
 
-function toScopes(scope: string | string[]): string[] {
-  return Array.isArray(scope) ? scope : scope.split(",").map((item) => item.trim()).filter(Boolean)
+function toScopes(scope: string | readonly string[]): string[] {
+  return typeof scope === "string" ? scope.split(",").map((item) => item.trim()).filter(Boolean) : [...scope]
 }
 
 function openTuiNamesForTextMateScope(scope: string): string[] {
@@ -141,7 +141,7 @@ function openTuiNamesForTextMateScope(scope: string): string[] {
   return [...names]
 }
 
-function toOpenTuiStyle(settings: ShikiTokenSettings): StyleDefinitionInput | null {
+function toOpenTuiStyle(settings: TextMateTokenSettings): StyleDefinitionInput | null {
   const style: StyleDefinitionInput = {}
 
   if (settings.foreground) style.fg = settings.foreground
@@ -152,7 +152,7 @@ function toOpenTuiStyle(settings: ShikiTokenSettings): StyleDefinitionInput | nu
   return Object.keys(style).length ? style : null
 }
 
-function parseFontStyle(fontStyle: ShikiFontStyle | undefined): Pick<StyleDefinitionInput, "bold" | "italic" | "underline"> | null {
+function parseFontStyle(fontStyle: TextMateFontStyle | undefined): Pick<StyleDefinitionInput, "bold" | "italic" | "underline"> | null {
   if (fontStyle === undefined || fontStyle === "" || fontStyle === -1) return null
 
   if (typeof fontStyle === "number") {

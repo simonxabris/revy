@@ -5,8 +5,8 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { createCliRenderer, fg, bold, pathToFiletype, t, StyledText, type DiffRenderable, type TextareaRenderable, type TextChunk } from "@opentui/core"
 import { createRoot, useKeyboard, useRenderer } from "@opentui/react"
 import { useMachine } from "@xstate/react"
-import nightOwl from 'tm-themes/themes/night-owl.json'
-import { shikiThemeToDiffTheme } from "./theme-mapper"
+import nightOwl from 'tm-themes/themes/github-dark.json'
+import { textMateThemeToDiffTheme } from "./theme-mapper"
 import { reviewMachine, type ReviewComment } from "./review-machine"
 import { availableAgents, dispatchReviewFix, listProviderModels, type AgentId, type AgentProviderModelOption } from "./agents"
 
@@ -145,25 +145,19 @@ function fuzzyMatches(value: string, query: string): boolean {
   return true
 }
 
+const codingTheme = textMateThemeToDiffTheme(nightOwl)
+const codingThemeColors = nightOwl.colors ?? {}
+
 const theme = {
-  backgroundColor: "#0d1117",
-  panelColor: "#161b22",
-  borderColor: "#30363d",
-  accent: "#58a6ff",
-  muted: "#8b949e",
-  fg: "#e6edf3",
-  addedBg: "#1f3d2b",
-  removedBg: "#4a2428",
-  contextBg: "#0d1117",
-  addedSignColor: "#3fb950",
-  removedSignColor: "#f85149",
-  modifiedSignColor: "#d29922",
-  lineNumberFg: "#6e7681",
-  lineNumberBg: "#161b22",
-  addedLineNumberBg: "#183a24",
-  removedLineNumberBg: "#3d1f23",
-  selectionBg: "#264f78",
-  selectionFg: "#ffffff",
+  backgroundColor: codingTheme.backgroundColor,
+  panelColor: codingThemeColors["sideBar.background"] ?? codingThemeColors["panel.background"] ?? codingTheme.backgroundColor,
+  borderColor: codingThemeColors["panel.border"] ?? codingThemeColors.focusBorder ?? codingTheme.lineNumberFg,
+  accent: codingThemeColors["terminal.ansiBlue"] ?? codingThemeColors["button.background"] ?? codingTheme.selectionBg,
+  muted: codingThemeColors["sideBarTitle.foreground"] ?? codingTheme.lineNumberFg,
+  fg: codingTheme.fg,
+  addedSignColor: codingTheme.addedSignColor,
+  removedSignColor: codingTheme.removedSignColor,
+  modifiedSignColor: codingThemeColors["editorGutter.modifiedBackground"] ?? codingThemeColors["terminal.ansiYellow"] ?? codingTheme.addedSignColor,
 }
 
 function filenameColorForStatus(status: string): string {
@@ -206,14 +200,14 @@ function App() {
   const commentsByFileRef = useRef(reviewState.context.commentsByFile)
   const diffRef = useRef<DiffRenderable | null>(null)
   const commentTextareaRef = useRef<TextareaRenderable | null>(null)
-  const diffTheme = useMemo(() => shikiThemeToDiffTheme(nightOwl as any), [])
+  const diffTheme = codingTheme
   const isDraftingComment = reviewState.matches("draftingComment")
   const activeDraft = reviewState.context.draft
 
   commentsByFileRef.current = reviewState.context.commentsByFile
 
   useEffect(() => {
-    ;(globalThis as typeof globalThis & { __revyGetCommentsByFile?: () => Record<string, ReviewComment[]> }).__revyGetCommentsByFile = () => commentsByFileRef.current
+    ; (globalThis as typeof globalThis & { __revyGetCommentsByFile?: () => Record<string, ReviewComment[]> }).__revyGetCommentsByFile = () => commentsByFileRef.current
     return () => {
       delete (globalThis as typeof globalThis & { __revyGetCommentsByFile?: () => Record<string, ReviewComment[]> }).__revyGetCommentsByFile
     }
@@ -585,7 +579,7 @@ function App() {
               <diff
                 ref={diffRef}
                 diff={diff}
-                view="unified"
+                view="split"
                 filetype={selected ? filetypeForDiffPath(selected.path) : undefined}
                 syntaxStyle={diffTheme.syntaxStyle}
                 showLineNumbers={true}
