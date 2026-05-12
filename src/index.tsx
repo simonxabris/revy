@@ -2,13 +2,15 @@
 /** @jsxImportSource @opentui/react */
 import { writeFileSync } from "node:fs"
 import { useEffect, useMemo, useRef, useState } from "react"
-import { createCliRenderer, fg, bold, pathToFiletype, t, StyledText, type DiffRenderable, type TextareaRenderable, type TextChunk } from "@opentui/core"
+import { createCliRenderer, fg, bold, t, StyledText, type BoxRenderable, type ScrollBoxRenderable, type TextareaRenderable, type TextChunk } from "@opentui/core"
 import { createRoot, useKeyboard, useRenderer } from "@opentui/react"
 import { useMachine } from "@xstate/react"
 import nightOwl from 'tm-themes/themes/github-dark.json'
 import { textMateThemeToDiffTheme } from "./theme-mapper"
 import { reviewMachine, type ReviewComment } from "./review-machine"
 import { availableAgents, dispatchReviewFix, listProviderModels, type AgentId, type AgentProviderModelOption } from "./agents"
+import { startDiffHighlightWorker, type DiffHighlightWorkerClient } from "./diff-highlight-worker-client"
+import { EMPTY_PARSED_DIFF_STATE, buildTerminalDiffRows, diffMetadataCacheKey, getDiffLineTypes, highlightedDiffCache, maxLineNumber, parseDiffMetadata, renderTerminalDiffRow, type LineColor, type ParsedDiffState } from "./diff-rendering"
 
 interface ChangedFile {
   path: string
@@ -112,25 +114,6 @@ function loadDiff(file: ChangedFile): string {
   return gitDiff(["diff", "HEAD", "--", file.path])
 }
 
-function filetypeForDiffPath(path: string): string | undefined {
-  const filetype = pathToFiletype(path)
-  return filetype === "json" ? "javascript" : filetype
-}
-
-type DiffLineType = "add" | "remove" | "context"
-
-function getDiffLineTypes(diff: string): DiffLineType[] {
-  return diff
-    .split("\n")
-    .filter((line) => !line.startsWith("diff --git") && !line.startsWith("index ") && !line.startsWith("--- ") && !line.startsWith("+++ ") && !line.startsWith("@@"))
-    .flatMap((line) => {
-      if (line.startsWith("+")) return ["add" as const]
-      if (line.startsWith("-")) return ["remove" as const]
-      if (line.startsWith(" ")) return ["context" as const]
-      return []
-    })
-}
-
 function fuzzyMatches(value: string, query: string): boolean {
   let valueIndex = 0
   const normalizedValue = value.toLowerCase()
@@ -180,7 +163,7 @@ function renderFileTree(files: ChangedFile[], selectedIndex: number, emptyMessag
   return new StyledText(chunks)
 }
 
-function App() {
+function App({ diffHighlightWorker }: { diffHighlightWorker: DiffHighlightWorkerClient }) {
   const renderer = useRenderer()
   const [files, setFiles] = useState<ChangedFile[]>(() => loadChangedFiles())
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -196,15 +179,36 @@ function App() {
   const [agentOptionsStatus, setAgentOptionsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle")
   const [agentRunStatus, setAgentRunStatus] = useState<"idle" | "running" | "done" | "error">("idle")
   const [agentRunMessage, setAgentRunMessage] = useState<string | null>(null)
+  const [parsedDiff, setParsedDiff] = useState<ParsedDiffState>(EMPTY_PARSED_DIFF_STATE)
   const [reviewState, sendReview] = useMachine(reviewMachine)
   const commentsByFileRef = useRef(reviewState.context.commentsByFile)
-  const diffRef = useRef<DiffRenderable | null>(null)
+  const diffPanelRef = useRef<BoxRenderable | null>(null)
+  const diffScrollRef = useRef<ScrollBoxRenderable | null>(null)
   const commentTextareaRef = useRef<TextareaRenderable | null>(null)
   const diffTheme = codingTheme
   const isDraftingComment = reviewState.matches("draftingComment")
   const activeDraft = reviewState.context.draft
 
   commentsByFileRef.current = reviewState.context.commentsByFile
+
+  useEffect(() => {
+    diffHighlightWorker.enqueueFiles(files)
+  }, [diffHighlightWorker, files])
+
+  useEffect(() => {
+    return diffHighlightWorker.subscribe(({ cacheKey, highlighted }) => {
+      setParsedDiff((current) => {
+        if (!current.metadata) return current
+        if (diffMetadataCacheKey(current.metadata) !== cacheKey) return current
+        return {
+          metadata: current.metadata,
+          highlighted,
+          rows: buildTerminalDiffRows(current.metadata, highlighted, diffTheme),
+          error: null,
+        }
+      })
+    })
+  }, [diffHighlightWorker, diffTheme])
 
   useEffect(() => {
     ; (globalThis as typeof globalThis & { __revyGetCommentsByFile?: () => Record<string, ReviewComment[]> }).__revyGetCommentsByFile = () => commentsByFileRef.current
@@ -222,7 +226,7 @@ function App() {
   const diff = selected ? loadDiff(selected) : ""
   const hasPatch = diff.startsWith("diff --git") || diff.startsWith("--- ")
   const diffLineTypes = useMemo(() => getDiffLineTypes(diff), [diff])
-  const diffLineCount = diffLineTypes.length
+  const diffLineCount = parsedDiff.rows.length || diffLineTypes.length
   const selectedRange = selectionAnchorLine === null
     ? null
     : {
@@ -231,48 +235,52 @@ function App() {
     }
 
   useEffect(() => {
-    const diffRenderable = diffRef.current as unknown as {
-      leftCodeRenderable?: { scrollY: number }
-      rightCodeRenderable?: { scrollY: number }
-    } | null
-    if (diffRenderable?.leftCodeRenderable) diffRenderable.leftCodeRenderable.scrollY = diffScrollY
-    if (diffRenderable?.rightCodeRenderable) diffRenderable.rightCodeRenderable.scrollY = diffScrollY
-    renderer?.requestRender()
-  }, [diffScrollY, renderer])
+    if (!hasPatch) {
+      setParsedDiff(EMPTY_PARSED_DIFF_STATE)
+      return
+    }
+
+    let cancelled = false
+
+    try {
+      const metadata = parseDiffMetadata(diff, selected?.path ?? "diff")
+
+      const cachedHighlight = highlightedDiffCache.get(diffMetadataCacheKey(metadata)) ?? null
+      setParsedDiff({
+        metadata,
+        highlighted: cachedHighlight,
+        rows: buildTerminalDiffRows(metadata, cachedHighlight, diffTheme),
+        error: null,
+      })
+
+      if (!cachedHighlight) {
+        void diffHighlightWorker.requestHighlight(selected?.path ?? "diff", diff)
+          .then((highlighted) => {
+            if (!cancelled) {
+              setParsedDiff({
+                metadata,
+                highlighted,
+                rows: buildTerminalDiffRows(metadata, highlighted, diffTheme),
+                error: null,
+              })
+            }
+          })
+          .catch(() => {
+            // Keep the immediate plain-text rows if highlighting fails.
+          })
+      }
+    } catch (error) {
+      setParsedDiff({ metadata: null, highlighted: null, rows: [], error: error instanceof Error ? error.message : String(error) })
+    }
+
+    return () => {
+      cancelled = true
+    }
+  }, [diff, diffHighlightWorker, diffTheme, hasPatch, selected?.path])
 
   useEffect(() => {
-    if (!hasPatch || !diffRef.current) return
-
-    const lineColors = new Map<number, { gutter: string; content: string }>()
-    diffLineTypes.forEach((type, index) => {
-      if (type === "add") lineColors.set(index, { gutter: diffTheme.addedLineNumberBg, content: diffTheme.addedBg })
-      else if (type === "remove") lineColors.set(index, { gutter: diffTheme.removedLineNumberBg, content: diffTheme.removedBg })
-      else lineColors.set(index, { gutter: diffTheme.lineNumberBg, content: diffTheme.contextBg })
-    })
-
-    const draftRange = activeDraft && activeDraft.filePath === selected?.path
-      ? { start: activeDraft.diffStartLine, end: activeDraft.diffEndLine }
-      : null
-    const highlightedRange = isDraftingComment ? draftRange : selectedRange
-    const commentsForSelectedFile = selected ? reviewState.context.commentsByFile[selected.path] ?? [] : []
-    for (const comment of commentsForSelectedFile) {
-      for (let line = comment.diffStartLine; line <= comment.diffEndLine; line++) {
-        const existing = lineColors.get(line)
-        lineColors.set(line, { gutter: "#d29922", content: existing?.content ?? diffTheme.contextBg })
-      }
-    }
-
-    if (highlightedRange) {
-      for (let line = highlightedRange.start; line <= highlightedRange.end; line++) {
-        lineColors.set(line, { gutter: diffTheme.selectionBg, content: diffTheme.selectionBg })
-      }
-    } else if (focusMode === "diff" && diffLineCount > 0) {
-      lineColors.set(currentDiffLine, { gutter: diffTheme.activeLineNumberBg, content: diffTheme.activeLineBg })
-    }
-
-    diffRef.current.setLineColors(lineColors)
-    renderer?.requestRender()
-  }, [activeDraft, currentDiffLine, diffLineCount, diffLineTypes, diffTheme, focusMode, hasPatch, isDraftingComment, renderer, reviewState.context.commentsByFile, selected, selectedRange])
+    diffScrollRef.current?.scrollTo(diffScrollY)
+  }, [diffScrollY])
 
   function resetDiffState(): void {
     setDiffScrollY(0)
@@ -287,9 +295,19 @@ function App() {
     setSelectedIndex(clampedIndex)
   }
 
+  function getDiffViewportHeight(): number {
+    const scrollViewportHeight = diffScrollRef.current?.viewport.height ?? 0
+    if (scrollViewportHeight > 0) return scrollViewportHeight
+
+    const panelHeight = diffPanelRef.current?.height ?? 0
+    if (panelHeight > 2) return panelHeight - 2
+
+    return Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
+  }
+
   function moveDiffCursor(delta: number, extendSelection = false): void {
     if (diffLineCount === 0) return
-    const viewportHeight = Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
+    const viewportHeight = getDiffViewportHeight()
 
     setCurrentDiffLine((line) => {
       if (extendSelection) setSelectionAnchorLine((anchor) => anchor ?? line)
@@ -490,8 +508,8 @@ function App() {
 
     if (key.name === "down" || key.name === "j") moveDiffCursor(1, key.shift)
     if (key.name === "up" || key.name === "k") moveDiffCursor(-1, key.shift)
-    if (key.name === "pagedown") moveDiffCursor(Math.max(1, (renderer?.terminalHeight ?? 24) - 6))
-    if (key.name === "pageup") moveDiffCursor(-Math.max(1, (renderer?.terminalHeight ?? 24) - 6))
+    if (key.name === "pagedown") moveDiffCursor(Math.max(1, getDiffViewportHeight() - 1))
+    if (key.name === "pageup") moveDiffCursor(-Math.max(1, getDiffViewportHeight() - 1))
     if (key.name === "home") {
       setSelectionAnchorLine(null)
       setCurrentDiffLine(0)
@@ -500,7 +518,7 @@ function App() {
   })
 
   const tree = renderFileTree(visibleFiles, effectiveSelectedIndex, files.length === 0 ? "No changes found." : "No matching files.")
-  const diffViewportHeight = Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
+  const diffViewportHeight = getDiffViewportHeight()
   const commentRow = activeDraft === null || activeDraft.filePath !== selected?.path ? null : activeDraft.diffEndLine - diffScrollY
   const isCommentVisible = commentRow !== null && commentRow >= 0 && commentRow < diffViewportHeight
   const commentCount = Object.values(reviewState.context.commentsByFile).reduce((count, comments) => count + comments.length, 0)
@@ -523,6 +541,27 @@ function App() {
   const agentTabs = availableAgents
     .map((agent, index) => `${agent.id === selectedPickerAgent ? "[" : " "}${index + 1} ${agent.label}${agent.id === selectedPickerAgent ? "]" : " "}`)
     .join("  ")
+  const pierreOverlays = new Map<number, LineColor>()
+  const draftRange = activeDraft && activeDraft.filePath === selected?.path
+    ? { start: activeDraft.diffStartLine, end: activeDraft.diffEndLine }
+    : null
+  const highlightedRange = isDraftingComment ? draftRange : selectedRange
+  const commentsForSelectedFile = selected ? reviewState.context.commentsByFile[selected.path] ?? [] : []
+  for (const comment of commentsForSelectedFile) {
+    for (let line = comment.diffStartLine; line <= comment.diffEndLine; line++) {
+      pierreOverlays.set(line, { gutter: "#d29922", content: diffTheme.contextBg })
+    }
+  }
+  if (highlightedRange) {
+    for (let line = highlightedRange.start; line <= highlightedRange.end; line++) {
+      pierreOverlays.set(line, { gutter: diffTheme.selectionBg, content: diffTheme.selectionBg })
+    }
+  } else if (focusMode === "diff" && diffLineCount > 0) {
+    pierreOverlays.set(currentDiffLine, { gutter: diffTheme.activeLineNumberBg, content: diffTheme.activeLineBg })
+  }
+  const sidePanelWidth = Math.max(28, Math.floor((renderer?.terminalWidth ?? 100) * 0.28))
+  const diffContentWidth = Math.max(30, (renderer?.terminalWidth ?? 100) - sidePanelWidth - 6)
+  const lineNumberDigits = String(maxLineNumber(parsedDiff.metadata)).length
 
   return (
     <box style={{ width: "100%", height: "100%", flexDirection: "column", backgroundColor: theme.backgroundColor }}>
@@ -565,6 +604,7 @@ function App() {
 
       <box style={{ flexGrow: 1, flexDirection: "row", backgroundColor: theme.backgroundColor }}>
         <box
+          ref={diffPanelRef}
           title={selected ? ` Diff: ${selected.path} ` : " Diff "}
           style={{
             flexGrow: 1,
@@ -576,28 +616,35 @@ function App() {
         >
           {hasPatch ? (
             <>
-              <diff
-                ref={diffRef}
-                diff={diff}
-                view="split"
-                filetype={selected ? filetypeForDiffPath(selected.path) : undefined}
-                syntaxStyle={diffTheme.syntaxStyle}
-                showLineNumbers={true}
-                wrapMode="none"
-                fg={diffTheme.fg}
-                addedBg={diffTheme.addedBg}
-                removedBg={diffTheme.removedBg}
-                contextBg={diffTheme.contextBg}
-                addedSignColor={diffTheme.addedSignColor}
-                removedSignColor={diffTheme.removedSignColor}
-                lineNumberFg={diffTheme.lineNumberFg}
-                lineNumberBg={diffTheme.lineNumberBg}
-                addedLineNumberBg={diffTheme.addedLineNumberBg}
-                removedLineNumberBg={diffTheme.removedLineNumberBg}
-                selectionBg={diffTheme.selectionBg}
-                selectionFg={diffTheme.selectionFg}
+              <scrollbox
+                ref={diffScrollRef}
+                scrollY={true}
+                viewportCulling={true}
+                focused={false}
+                rootOptions={{ backgroundColor: diffTheme.backgroundColor }}
+                wrapperOptions={{ backgroundColor: diffTheme.backgroundColor }}
+                viewportOptions={{ backgroundColor: diffTheme.backgroundColor }}
+                contentOptions={{ backgroundColor: diffTheme.backgroundColor }}
+                verticalScrollbarOptions={{ visible: false }}
+                horizontalScrollbarOptions={{ visible: false }}
                 style={{ flexGrow: 1, flexShrink: 1 }}
-              />
+              >
+                <box style={{ width: "100%", flexDirection: "column", backgroundColor: diffTheme.backgroundColor }}>
+                  {parsedDiff.error ? (
+                    <text content={`Failed to render diff: ${parsedDiff.error}`} fg={diffTheme.fg} bg={diffTheme.backgroundColor} />
+                  ) : parsedDiff.rows.length === 0 ? (
+                    <text content="Rendering diff..." fg={diffTheme.fg} bg={diffTheme.backgroundColor} />
+                  ) : parsedDiff.rows.map((row, index) => (
+                    <box key={`diff-row:${index}`} style={{ width: "100%", height: 1, flexShrink: 0, backgroundColor: diffTheme.backgroundColor }}>
+                      <text
+                        content={renderTerminalDiffRow(row, index, lineNumberDigits, diffContentWidth, diffTheme, pierreOverlays, theme)}
+                        wrapMode="none"
+                        truncate={true}
+                      />
+                    </box>
+                  ))}
+                </box>
+              </scrollbox>
 
               {isCommentVisible ? (
                 <box
@@ -648,7 +695,7 @@ function App() {
 
         <box
           style={{
-            width: Math.max(28, Math.floor((renderer?.terminalWidth ?? 100) * 0.28)),
+            width: sidePanelWidth,
             flexShrink: 0,
             flexDirection: "column",
             backgroundColor: theme.panelColor,
@@ -741,9 +788,11 @@ function App() {
 
 try {
   git(["rev-parse", "--is-inside-work-tree"])
+  const diffHighlightWorker = startDiffHighlightWorker({ cwd: process.cwd() })
   const renderer = await createCliRenderer({
     exitOnCtrlC: true,
     onDestroy: () => {
+      diffHighlightWorker.dispose()
       if (!cliOptions.outputPath) return
       const getCommentsByFile = (globalThis as typeof globalThis & { __revyGetCommentsByFile?: () => Record<string, ReviewComment[]> }).__revyGetCommentsByFile
       const commentsByFile = getCommentsByFile?.() ?? {}
@@ -755,7 +804,7 @@ try {
     },
   })
   renderer.setBackgroundColor(theme.backgroundColor)
-  createRoot(renderer).render(<App />)
+  createRoot(renderer).render(<App diffHighlightWorker={diffHighlightWorker} />)
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error))
   process.exit(1)
