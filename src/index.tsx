@@ -4,7 +4,8 @@ import { writeFileSync } from "node:fs"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { createCliRenderer, fg, bold, t, StyledText, type BoxRenderable, type ScrollBoxRenderable, type TextareaRenderable, type TextChunk } from "@opentui/core"
 import { createRoot, useKeyboard, useRenderer } from "@opentui/react"
-import { useMachine } from "@xstate/react"
+import { useSelector } from "@xstate/react"
+import { createActor, type ActorRefFrom } from "xstate"
 import nightOwl from 'tm-themes/themes/github-dark.json'
 import { textMateThemeToDiffTheme } from "./theme-mapper"
 import { reviewMachine, type ReviewComment } from "./review-machine"
@@ -163,7 +164,7 @@ function renderFileTree(files: ChangedFile[], selectedIndex: number, emptyMessag
   return new StyledText(chunks)
 }
 
-function App({ diffHighlightWorker }: { diffHighlightWorker: DiffHighlightWorkerClient }) {
+function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHighlightWorkerClient; reviewActor: ActorRefFrom<typeof reviewMachine> }) {
   const renderer = useRenderer()
   const [files, setFiles] = useState<ChangedFile[]>(() => loadChangedFiles())
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -180,16 +181,14 @@ function App({ diffHighlightWorker }: { diffHighlightWorker: DiffHighlightWorker
   const [agentRunStatus, setAgentRunStatus] = useState<"idle" | "running" | "done" | "error">("idle")
   const [agentRunMessage, setAgentRunMessage] = useState<string | null>(null)
   const [parsedDiff, setParsedDiff] = useState<ParsedDiffState>(EMPTY_PARSED_DIFF_STATE)
-  const [reviewState, sendReview] = useMachine(reviewMachine)
-  const commentsByFileRef = useRef(reviewState.context.commentsByFile)
+  const reviewState = useSelector(reviewActor, (snapshot) => snapshot)
+  const sendReview = reviewActor.send
   const diffPanelRef = useRef<BoxRenderable | null>(null)
   const diffScrollRef = useRef<ScrollBoxRenderable | null>(null)
   const commentTextareaRef = useRef<TextareaRenderable | null>(null)
   const diffTheme = codingTheme
   const isDraftingComment = reviewState.matches("draftingComment")
   const activeDraft = reviewState.context.draft
-
-  commentsByFileRef.current = reviewState.context.commentsByFile
 
   useEffect(() => {
     diffHighlightWorker.enqueueFiles(files)
@@ -209,13 +208,6 @@ function App({ diffHighlightWorker }: { diffHighlightWorker: DiffHighlightWorker
       })
     })
   }, [diffHighlightWorker, diffTheme])
-
-  useEffect(() => {
-    ; (globalThis as typeof globalThis & { __revyGetCommentsByFile?: () => Record<string, ReviewComment[]> }).__revyGetCommentsByFile = () => commentsByFileRef.current
-    return () => {
-      delete (globalThis as typeof globalThis & { __revyGetCommentsByFile?: () => Record<string, ReviewComment[]> }).__revyGetCommentsByFile
-    }
-  }, [])
 
   const visibleFiles = useMemo(
     () => files.filter((file) => fuzzyMatches(`${file.status} ${file.path}`, fileSearchQuery)),
@@ -789,13 +781,14 @@ function App({ diffHighlightWorker }: { diffHighlightWorker: DiffHighlightWorker
 try {
   git(["rev-parse", "--is-inside-work-tree"])
   const diffHighlightWorker = startDiffHighlightWorker({ cwd: process.cwd() })
+  const reviewActor = createActor(reviewMachine).start()
   const renderer = await createCliRenderer({
     exitOnCtrlC: true,
     onDestroy: () => {
       diffHighlightWorker.dispose()
+      const commentsByFile = reviewActor.getSnapshot().context.commentsByFile
+      reviewActor.stop()
       if (!cliOptions.outputPath) return
-      const getCommentsByFile = (globalThis as typeof globalThis & { __revyGetCommentsByFile?: () => Record<string, ReviewComment[]> }).__revyGetCommentsByFile
-      const commentsByFile = getCommentsByFile?.() ?? {}
       try {
         writeReviewComments(cliOptions.outputPath, commentsByFile)
       } catch (error) {
@@ -804,7 +797,7 @@ try {
     },
   })
   renderer.setBackgroundColor(theme.backgroundColor)
-  createRoot(renderer).render(<App diffHighlightWorker={diffHighlightWorker} />)
+  createRoot(renderer).render(<App diffHighlightWorker={diffHighlightWorker} reviewActor={reviewActor} />)
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error))
   process.exit(1)
