@@ -54,11 +54,7 @@ async function launchRevy(ctx: ExtensionCommandContext): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "pi-revy-"));
   const outputPath = join(dir, "comments.json");
   const configuredCommand = process.env.REVY_COMMAND;
-  const command = configuredCommand
-    ? shellWords(configuredCommand)
-    : existsSync(join(ctx.cwd, "src/index.tsx"))
-      ? ["bun", "run", "src/index.tsx"]
-      : ["revy"];
+  const command = configuredCommand ? shellWords(configuredCommand) : ["revy"];
 
   try {
     if (command.length === 0) {

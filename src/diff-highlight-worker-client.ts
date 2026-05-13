@@ -36,7 +36,8 @@ function metadataCacheKey(filePath: string, diff: string): string {
 }
 
 export function startDiffHighlightWorker(options: { cwd: string }): DiffHighlightWorkerClient {
-  const worker = new Worker(new URL("./diff-highlight.worker.ts", import.meta.url), { type: "module" })
+  const workerPath = import.meta.url.endsWith("/index.js") ? "./diff-highlight.worker.js" : "./diff-highlight.worker.ts"
+  const worker = new Worker(new URL(workerPath, import.meta.url), { type: "module" })
   const pendingById = new Map<string, PendingRequest>()
   const inFlightByCacheKey = new Map<string, Promise<HighlightedDiffCode>>()
   const listeners = new Set<(event: HighlightCompleteEvent) => void>()

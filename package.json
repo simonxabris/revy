@@ -1,10 +1,18 @@
 {
-  "name": "revy",
-  "module": "index.ts",
+  "name": "@simonxabris/revy",
+  "version": "0.0.1",
   "type": "module",
-  "private": true,
+  "private": false,
   "bin": {
-    "revy": "./src/index.tsx"
+    "revy": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && bun build src/index.tsx src/diff-highlight.worker.ts --target=bun --outdir=dist --entry-naming='[name].js' --chunk-naming='[name]-[hash].js' --asset-naming='[name]-[hash].[ext]'" ,
+    "prepack": "bun run build"
   },
   "pi": {
     "extensions": ["./.pi/extensions/revy.ts"]
