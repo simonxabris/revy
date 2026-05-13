@@ -498,6 +498,8 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
       return
     }
 
+    if (key.ctrl && key.name === "d") moveDiffCursor(Math.max(1, Math.floor(getDiffViewportHeight() / 2)))
+    if (key.ctrl && key.name === "u") moveDiffCursor(-Math.max(1, Math.floor(getDiffViewportHeight() / 2)))
     if (key.name === "down" || key.name === "j") moveDiffCursor(1, key.shift)
     if (key.name === "up" || key.name === "k") moveDiffCursor(-1, key.shift)
     if (key.name === "pagedown") moveDiffCursor(Math.max(1, getDiffViewportHeight() - 1))
@@ -570,7 +572,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
         }}
       >
         <text
-          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : focusMode === "agent" ? "agent: ↑/↓ choose • enter run • esc cancel" : focusMode === "tree" ? `tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit${cliOptions.outputPath ? " • writes comments on quit" : ""}` : `diff: line ${Math.min(currentDiffLine + 1, diffLineCount)}/${diffLineCount} • ↑/↓ move • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
+          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : focusMode === "agent" ? "agent: ↑/↓ choose • enter run • esc cancel" : focusMode === "tree" ? `tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit${cliOptions.outputPath ? " • writes comments on quit" : ""}` : `diff: line ${Math.min(currentDiffLine + 1, diffLineCount)}/${diffLineCount} • ↑/↓ move • ctrl+d/u half-page • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
         />
       </box>
 
