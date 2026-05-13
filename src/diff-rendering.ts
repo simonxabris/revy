@@ -1,5 +1,5 @@
 import { fg, parseColor, t, StyledText, type TextChunk } from "@opentui/core"
-import { getFiletypeFromFileName, getHighlighterOptions, getSharedHighlighter, processPatch, renderDiffWithHighlighter, type DiffsHighlighter, type FileDiffMetadata } from "@pierre/diffs"
+import { getFiletypeFromFileName, processPatch, type FileDiffMetadata } from "@pierre/diffs"
 
 export type DiffLineType = "add" | "remove" | "context"
 export type LineColor = { gutter: string; content: string }
@@ -66,8 +66,6 @@ const terminalRowsCache = new WeakMap<FileDiffMetadata, WeakMap<object, WeakMap<
 const plainRowsCacheKey = {}
 const parsedStyleCache = new Map<string, Record<string, string>>()
 const flattenedLineCache = new WeakMap<HastNode, Map<string, RenderSpan[]>>()
-let highlighterPromise: Promise<DiffsHighlighter> | null = null
-
 export function getDiffLineTypes(diff: string): DiffLineType[] {
   return diff
     .split("\n")
@@ -280,38 +278,8 @@ export function renderTerminalDiffRow(row: TerminalDiffRow, index: number, digit
   ])
 }
 
-function getHighlighter(): Promise<DiffsHighlighter> {
-  highlighterPromise ??= getSharedHighlighter({
-    ...getHighlighterOptions("tsx", { theme: "pierre-dark" }),
-    langs: ["tsx", "typescript", "javascript", "jsx", "json", "markdown", "css", "html", "bash", "yaml", "rust", "text"],
-    preferredHighlighter: "shiki-js",
-  })
-  return highlighterPromise
-}
-
 export function diffMetadataCacheKey(metadata: FileDiffMetadata): string {
   return metadata.cacheKey ?? `${metadata.name}:${metadata.deletionLines.join("\n")}:${metadata.additionLines.join("\n")}`
-}
-
-export async function highlightDiffMetadata(metadata: FileDiffMetadata): Promise<HighlightedDiffCode> {
-  const cacheKey = diffMetadataCacheKey(metadata)
-  const cached = highlightedDiffCache.get(cacheKey)
-  if (cached) return cached
-
-  const highlighter = await getHighlighter()
-  const result = renderDiffWithHighlighter(metadata, highlighter, {
-    theme: "pierre-dark",
-    useTokenTransformer: false,
-    tokenizeMaxLineLength: 1000,
-    lineDiffType: "word-alt",
-    maxLineDiffLength: 10000,
-  })
-  const highlighted = {
-    deletionLines: result.code.deletionLines as Array<HastNode | undefined>,
-    additionLines: result.code.additionLines as Array<HastNode | undefined>,
-  }
-  highlightedDiffCache.set(cacheKey, highlighted)
-  return highlighted
 }
 
 export function parseDiffMetadata(diff: string, filePath: string): FileDiffMetadata {
