@@ -1,6 +1,6 @@
 {
   "name": "@simonxabris/revy",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "type": "module",
   "private": false,
   "bin": {
@@ -14,7 +14,7 @@
     "access": "public"
   },
   "scripts": {
-    "build": "rm -rf dist && bun build src/index.tsx src/diff-highlight.worker.ts --target=bun --outdir=dist --entry-naming='[name].js' --chunk-naming='[name]-[hash].js' --asset-naming='[name]-[hash].[ext]'" ,
+    "build": "rm -rf dist && bun build src/index.tsx src/diff-highlight.worker.ts --target=bun --packages=external --outdir=dist --entry-naming='[name].js' --chunk-naming='[name]-[hash].js' --asset-naming='[name]-[hash].[ext]'" ,
     "prepack": "bun run build"
   },
   "pi": {
