@@ -10,6 +10,9 @@
     "dist",
     "README.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "rm -rf dist && bun build src/index.tsx src/diff-highlight.worker.ts --target=bun --outdir=dist --entry-naming='[name].js' --chunk-naming='[name]-[hash].js' --asset-naming='[name]-[hash].[ext]'" ,
     "prepack": "bun run build"
