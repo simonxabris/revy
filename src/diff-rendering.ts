@@ -217,22 +217,47 @@ export function maxLineNumber(metadata: FileDiffMetadata | null): number {
   return highest
 }
 
-function fitText(value: string, width: number): string {
-  if (width <= 0) return ""
-  if (value.length <= width) return value.padEnd(width)
-  if (width === 1) return "…"
-  return `${value.slice(0, width - 1)}…`
+export function maxTerminalDiffContentScroll(rows: TerminalDiffRow[], digits: number, viewportWidth: number): number {
+  const separatorWidth = " │ ".length
+  const sideWidth = Math.max(10, Math.floor((viewportWidth - separatorWidth) / 2))
+  const gutterWidth = `+ ${" ".repeat(digits)} `.length
+  const contentWidth = Math.max(0, sideWidth - gutterWidth)
+  let maxTextWidth = 0
+
+  for (const row of rows) {
+    if (row.type !== "split-line") continue
+    maxTextWidth = Math.max(maxTextWidth, row.left.text.length, row.right.text.length)
+  }
+
+  return Math.max(0, maxTextWidth - contentWidth)
 }
 
-function fitSpans(spans: RenderSpan[], width: number): RenderSpan[] {
+function fitText(value: string, width: number, offset = 0): string {
+  if (width <= 0) return ""
+  const visible = value.slice(offset)
+  if (visible.length <= width) return visible.padEnd(width)
+  if (width === 1) return "…"
+  return `${visible.slice(0, width - 1)}…`
+}
+
+function fitSpans(spans: RenderSpan[], width: number, offset = 0): RenderSpan[] {
   if (width <= 0) return []
   const result: RenderSpan[] = []
   let remaining = width
+  let skipped = 0
   for (const span of spans) {
     if (remaining <= 0) break
-    const text = span.text.length <= remaining ? span.text : span.text.slice(0, remaining)
+    if (skipped + span.text.length <= offset) {
+      skipped += span.text.length
+      continue
+    }
+
+    const spanOffset = Math.max(0, offset - skipped)
+    const visibleText = span.text.slice(spanOffset)
+    const text = visibleText.length <= remaining ? visibleText : visibleText.slice(0, remaining)
     if (text.length > 0) result.push({ ...span, text })
     remaining -= text.length
+    skipped += span.text.length
   }
   if (remaining > 0) result.push({ text: " ".repeat(remaining) })
   return result
@@ -244,7 +269,7 @@ function splitCellColors(kind: SplitCell["kind"], diffTheme: DiffTheme): { gutte
   return { gutterBg: diffTheme.lineNumberBg, contentBg: diffTheme.contextBg, signFg: diffTheme.lineNumberFg }
 }
 
-function renderSplitCell(cell: SplitCell, width: number, digits: number, diffTheme: DiffTheme, overlay: LineColor | undefined): TextChunk[] {
+function renderSplitCell(cell: SplitCell, width: number, digits: number, diffTheme: DiffTheme, overlay: LineColor | undefined, contentScrollX: number): TextChunk[] {
   const colors = splitCellColors(cell.kind, diffTheme)
   const gutterBg = overlay?.gutter ?? colors.gutterBg
   const contentBg = overlay?.content ?? colors.contentBg
@@ -253,7 +278,7 @@ function renderSplitCell(cell: SplitCell, width: number, digits: number, diffThe
   const contentWidth = Math.max(0, width - gutter.length)
   return [
     { __isChunk: true, text: gutter, fg: parseColor(colors.signFg), bg: parseColor(gutterBg) },
-    ...fitSpans(splitCellSpans(cell), contentWidth).map((span) => ({
+    ...fitSpans(splitCellSpans(cell), contentWidth, contentScrollX).map((span) => ({
       __isChunk: true as const,
       text: span.text,
       fg: parseColor(span.fg ?? diffTheme.fg),
@@ -262,19 +287,19 @@ function renderSplitCell(cell: SplitCell, width: number, digits: number, diffThe
   ]
 }
 
-export function renderTerminalDiffRow(row: TerminalDiffRow, index: number, digits: number, width: number, diffTheme: DiffTheme, overlays: Map<number, LineColor>, uiTheme: DiffRowUiTheme): StyledText {
+export function renderTerminalDiffRow(row: TerminalDiffRow, index: number, digits: number, width: number, diffTheme: DiffTheme, overlays: Map<number, LineColor>, uiTheme: DiffRowUiTheme, contentScrollX = 0): StyledText {
   const overlay = overlays.get(index)
   if (row.type !== "split-line") {
     const color = row.type === "hunk-header" ? uiTheme.accent : uiTheme.muted
-    return t`${fg(color)(fitText(row.text, width))}`
+    return t`${fg(color)(fitText(row.text, width, contentScrollX))}`
   }
 
   const separator = " │ "
   const sideWidth = Math.max(10, Math.floor((width - separator.length) / 2))
   return new StyledText([
-    ...renderSplitCell(row.left, sideWidth, digits, diffTheme, overlay),
+    ...renderSplitCell(row.left, sideWidth, digits, diffTheme, overlay, contentScrollX),
     { __isChunk: true, text: separator, fg: parseColor(uiTheme.borderColor), bg: parseColor(diffTheme.backgroundColor) },
-    ...renderSplitCell(row.right, width - sideWidth - separator.length, digits, diffTheme, overlay),
+    ...renderSplitCell(row.right, width - sideWidth - separator.length, digits, diffTheme, overlay, contentScrollX),
   ])
 }
 

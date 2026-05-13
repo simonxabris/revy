@@ -11,7 +11,7 @@ import { textMateThemeToDiffTheme } from "./theme-mapper"
 import { reviewMachine, type ReviewComment } from "./review-machine"
 import { availableAgents, dispatchReviewFix, listProviderModels, type AgentId, type AgentProviderModelOption } from "./agents"
 import { startDiffHighlightWorker, type DiffHighlightWorkerClient } from "./diff-highlight-worker-client"
-import { EMPTY_PARSED_DIFF_STATE, buildTerminalDiffRows, diffMetadataCacheKey, getDiffLineTypes, highlightedDiffCache, maxLineNumber, parseDiffMetadata, renderTerminalDiffRow, type LineColor, type ParsedDiffState } from "./diff-rendering"
+import { EMPTY_PARSED_DIFF_STATE, buildTerminalDiffRows, diffMetadataCacheKey, getDiffLineTypes, highlightedDiffCache, maxLineNumber, maxTerminalDiffContentScroll, parseDiffMetadata, renderTerminalDiffRow, type LineColor, type ParsedDiffState } from "./diff-rendering"
 
 interface ChangedFile {
   path: string
@@ -180,6 +180,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
   const [fileSearchQuery, setFileSearchQuery] = useState("")
   const [focusMode, setFocusMode] = useState<"tree" | "diff" | "comment" | "agent">("tree")
   const [diffScrollY, setDiffScrollY] = useState(0)
+  const [diffScrollX, setDiffScrollX] = useState(0)
   const [currentDiffLine, setCurrentDiffLine] = useState(0)
   const [selectionAnchorLine, setSelectionAnchorLine] = useState<number | null>(null)
   const [selectedAgentIndex, setSelectedAgentIndex] = useState(0)
@@ -295,6 +296,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
 
   function resetDiffState(): void {
     setDiffScrollY(0)
+    setDiffScrollX(0)
     setCurrentDiffLine(0)
     setSelectionAnchorLine(null)
     setFocusMode("tree")
@@ -314,6 +316,12 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     if (panelHeight > 2) return panelHeight - 2
 
     return Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
+  }
+
+  function getDiffViewportWidth(): number {
+    const scrollViewportWidth = diffScrollRef.current?.viewport.width ?? 0
+    if (scrollViewportWidth > 0) return scrollViewportWidth
+    return diffContentWidth
   }
 
   function isSelectableDiffLine(index: number): boolean {
@@ -360,6 +368,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     const firstLine = firstSelectableDiffLine()
     setCurrentDiffLine(firstLine === -1 ? 0 : firstLine)
     setDiffScrollY(0)
+    setDiffScrollX(0)
     setSelectionAnchorLine(null)
   }
 
@@ -377,6 +386,10 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
       scrollToDiffLine(nextLine, viewportHeight)
       return nextLine
     })
+  }
+
+  function moveDiffHorizontally(delta: number): void {
+    setDiffScrollX((scrollX) => Math.max(0, Math.min(diffMaxScrollX, scrollX + delta)))
   }
 
   function findCommentForLine(filePath: string, line: number): ReviewComment | undefined {
@@ -567,6 +580,8 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     if (key.ctrl && key.name === "u") moveDiffCursor(-Math.max(1, Math.floor(getDiffViewportHeight() / 2)))
     if (key.name === "down" || key.name === "j") moveDiffCursor(1, key.shift)
     if (key.name === "up" || key.name === "k") moveDiffCursor(-1, key.shift)
+    if (key.name === "right") moveDiffHorizontally(key.shift ? Math.max(1, Math.floor(getDiffViewportWidth() / 2)) : 8)
+    if (key.name === "left") moveDiffHorizontally(key.shift ? -Math.max(1, Math.floor(getDiffViewportWidth() / 2)) : -8)
     if (key.name === "pagedown") moveDiffCursor(Math.max(1, getDiffViewportHeight() - 1))
     if (key.name === "pageup") moveDiffCursor(-Math.max(1, getDiffViewportHeight() - 1))
     if (key.name === "home") {
@@ -619,6 +634,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
   const sidePanelWidth = Math.max(28, Math.floor((renderer?.terminalWidth ?? 100) * 0.28))
   const diffContentWidth = Math.max(30, (renderer?.terminalWidth ?? 100) - sidePanelWidth - 6)
   const lineNumberDigits = String(maxLineNumber(parsedDiff.metadata)).length
+  const diffMaxScrollX = maxTerminalDiffContentScroll(parsedDiff.rows, lineNumberDigits, diffContentWidth)
   const currentSelectableDiffLine = selectableDiffLineOrdinal(currentDiffLine)
 
   return (
@@ -636,7 +652,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
         }}
       >
         <text
-          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : focusMode === "agent" ? "agent: ↑/↓ choose • enter run • esc cancel" : focusMode === "tree" ? `tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit${cliOptions.outputPath ? " • writes comments on quit" : ""}` : `diff: line ${Math.min(currentSelectableDiffLine, selectableDiffLineCount)}/${selectableDiffLineCount} • ↑/↓ move • ctrl+d/u half-page • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
+          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : focusMode === "agent" ? "agent: ↑/↓ choose • enter run • esc cancel" : focusMode === "tree" ? `tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit${cliOptions.outputPath ? " • writes comments on quit" : ""}` : `diff: line ${Math.min(currentSelectableDiffLine, selectableDiffLineCount)}/${selectableDiffLineCount} • ↑/↓ move • ←/→ pan • ctrl+d/u half-page • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
         />
       </box>
 
@@ -695,7 +711,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
                   ) : parsedDiff.rows.map((row, index) => (
                     <box key={`diff-row:${index}`} style={{ width: "100%", height: 1, flexShrink: 0, backgroundColor: diffTheme.backgroundColor }}>
                       <text
-                        content={renderTerminalDiffRow(row, index, lineNumberDigits, diffContentWidth, diffTheme, pierreOverlays, theme)}
+                        content={renderTerminalDiffRow(row, index, lineNumberDigits, diffContentWidth, diffTheme, pierreOverlays, theme, diffScrollX)}
                         wrapMode="none"
                         truncate={true}
                       />
