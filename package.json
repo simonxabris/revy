@@ -1,6 +1,6 @@
 {
   "name": "@simonxabris/revy",
-  "version": "0.0.3",
+  "version": "0.0.5",
   "type": "module",
   "private": false,
   "bin": {
@@ -8,6 +8,7 @@
   },
   "files": [
     "dist",
+    ".pi/extensions/revy.ts",
     "README.md"
   ],
   "publishConfig": {
