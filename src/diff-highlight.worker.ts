@@ -45,8 +45,8 @@ function gitDiff(args: string[], cwd: string): string {
 }
 
 function loadDiff(file: DiffHighlightFile, cwd: string): string {
-  if (file.status === "??") return gitDiff(["diff", "--no-index", "--", "/dev/null", file.path], cwd)
-  return gitDiff(["diff", "HEAD", "--", file.path], cwd)
+  if (file.status === "??") return gitDiff(["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", file.path], cwd)
+  return gitDiff(["diff", "--no-color", "--no-ext-diff", "HEAD", "--", file.path], cwd)
 }
 
 function cacheKeyFor(metadata: FileDiffMetadata): string {

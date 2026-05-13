@@ -45,6 +45,7 @@ function parseCliOptions(argv: string[]): CliOptions {
 }
 
 const cliOptions = parseCliOptions(Bun.argv.slice(2))
+let gitCwd = process.cwd()
 
 function collectReviewComments(commentsByFile: Record<string, ReviewComment[]>): Array<Omit<ReviewComment, "createdAt"> & { createdAt: string }> {
   return Object.values(commentsByFile)
@@ -60,13 +61,13 @@ function collectReviewComments(commentsByFile: Record<string, ReviewComment[]>):
     }))
 }
 
-function writeReviewComments(outputPath: string, commentsByFile: Record<string, ReviewComment[]>): void {
+function writeReviewComments(outputPath: string, commentsByFile: Record<string, ReviewComment[]>, repoRoot: string): void {
   writeFileSync(
     outputPath,
     JSON.stringify(
       {
         version: 1,
-        repoRoot: process.cwd(),
+        repoRoot,
         comments: collectReviewComments(commentsByFile),
       },
       null,
@@ -76,7 +77,7 @@ function writeReviewComments(outputPath: string, commentsByFile: Record<string, 
 }
 
 function git(args: string[]): string {
-  const result = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" })
+  const result = Bun.spawnSync(["git", ...args], { cwd: gitCwd, stdout: "pipe", stderr: "pipe" })
   if (!result.success) {
     const message = new TextDecoder().decode(result.stderr).trim()
     throw new Error(message || `git ${args.join(" ")} failed`)
@@ -85,7 +86,7 @@ function git(args: string[]): string {
 }
 
 function gitDiff(args: string[]): string {
-  const result = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" })
+  const result = Bun.spawnSync(["git", ...args], { cwd: gitCwd, stdout: "pipe", stderr: "pipe" })
   const stdout = new TextDecoder().decode(result.stdout)
   if (!result.success && stdout.length === 0) {
     const message = new TextDecoder().decode(result.stderr).trim()
@@ -95,24 +96,32 @@ function gitDiff(args: string[]): string {
 }
 
 function loadChangedFiles(): ChangedFile[] {
-  const output = git(["status", "--porcelain=v1"])
-  return output
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => {
-      const status = line.slice(0, 2).trim() || "M"
-      const rawPath = line.slice(3).trim()
-      const renamedPath = rawPath.includes(" -> ") ? rawPath.split(" -> ").pop() : rawPath
-      return { status, path: renamedPath ?? rawPath }
-    })
+  const output = git(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+  const entries = output.split("\0").filter(Boolean)
+  const files: ChangedFile[] = []
+
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index]!
+    const status = entry.slice(0, 2).trim() || "M"
+    const path = entry.slice(3)
+    if (!path) continue
+
+    files.push({ status, path })
+
+    // In porcelain v1 -z output, renames/copies are encoded as:
+    // "XY new-path\0old-path\0". The diff should be loaded for new-path.
+    if (status.includes("R") || status.includes("C")) index++
+  }
+
+  return files
 }
 
 function loadDiff(file: ChangedFile): string {
   if (file.status === "??") {
-    return gitDiff(["diff", "--no-index", "--", "/dev/null", file.path])
+    return gitDiff(["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", file.path])
   }
 
-  return gitDiff(["diff", "HEAD", "--", file.path])
+  return gitDiff(["diff", "--no-color", "--no-ext-diff", "HEAD", "--", file.path])
 }
 
 function fuzzyMatches(value: string, query: string): boolean {
@@ -219,6 +228,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
   const hasPatch = diff.startsWith("diff --git") || diff.startsWith("--- ")
   const diffLineTypes = useMemo(() => getDiffLineTypes(diff), [diff])
   const diffLineCount = parsedDiff.rows.length || diffLineTypes.length
+  const selectableDiffLineCount = parsedDiff.rows.filter((row) => row.type === "split-line").length || diffLineTypes.length
   const selectedRange = selectionAnchorLine === null
     ? null
     : {
@@ -274,6 +284,15 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     diffScrollRef.current?.scrollTo(diffScrollY)
   }, [diffScrollY])
 
+  useEffect(() => {
+    if (focusMode !== "diff" || diffLineCount === 0 || isSelectableDiffLine(currentDiffLine)) return
+    const firstLine = firstSelectableDiffLine()
+    if (firstLine !== -1) {
+      setCurrentDiffLine(firstLine)
+      scrollToDiffLine(firstLine)
+    }
+  }, [currentDiffLine, diffLineCount, focusMode, parsedDiff.rows])
+
   function resetDiffState(): void {
     setDiffScrollY(0)
     setCurrentDiffLine(0)
@@ -297,6 +316,53 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     return Math.max(1, (renderer?.terminalHeight ?? 24) - 5)
   }
 
+  function isSelectableDiffLine(index: number): boolean {
+    const row = parsedDiff.rows[index]
+    return row ? row.type === "split-line" : diffLineTypes.length > 0 && index >= 0 && index < diffLineTypes.length
+  }
+
+  function firstSelectableDiffLine(): number {
+    const rowIndex = parsedDiff.rows.findIndex((row) => row.type === "split-line")
+    if (rowIndex !== -1) return rowIndex
+    return diffLineTypes.length > 0 ? 0 : -1
+  }
+
+  function selectableDiffLineOrdinal(index: number): number {
+    if (parsedDiff.rows.length === 0) return diffLineTypes.length === 0 ? 0 : index + 1
+    return parsedDiff.rows.slice(0, index + 1).filter((row) => row.type === "split-line").length
+  }
+
+  function findSelectableDiffLine(from: number, delta: number): number {
+    if (diffLineCount === 0 || delta === 0) return from
+
+    const direction = delta > 0 ? 1 : -1
+    let nextLine = from
+    for (let remaining = Math.abs(delta); remaining > 0; remaining--) {
+      let candidate = nextLine
+      do {
+        candidate += direction
+        if (candidate < 0 || candidate >= diffLineCount) return nextLine
+      } while (!isSelectableDiffLine(candidate))
+      nextLine = candidate
+    }
+    return nextLine
+  }
+
+  function scrollToDiffLine(nextLine: number, viewportHeight = getDiffViewportHeight()): void {
+    setDiffScrollY((scrollY) => {
+      if (nextLine < scrollY) return nextLine
+      if (nextLine >= scrollY + viewportHeight) return nextLine - viewportHeight + 1
+      return scrollY
+    })
+  }
+
+  function focusFirstSelectableDiffLine(): void {
+    const firstLine = firstSelectableDiffLine()
+    setCurrentDiffLine(firstLine === -1 ? 0 : firstLine)
+    setDiffScrollY(0)
+    setSelectionAnchorLine(null)
+  }
+
   function moveDiffCursor(delta: number, extendSelection = false): void {
     if (diffLineCount === 0) return
     const viewportHeight = getDiffViewportHeight()
@@ -305,12 +371,10 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
       if (extendSelection) setSelectionAnchorLine((anchor) => anchor ?? line)
       else setSelectionAnchorLine(null)
 
-      const nextLine = Math.max(0, Math.min(diffLineCount - 1, line + delta))
-      setDiffScrollY((scrollY) => {
-        if (nextLine < scrollY) return nextLine
-        if (nextLine >= scrollY + viewportHeight) return nextLine - viewportHeight + 1
-        return scrollY
-      })
+      const startLine = isSelectableDiffLine(line) ? line : firstSelectableDiffLine()
+      if (startLine === -1) return line
+      const nextLine = findSelectableDiffLine(startLine, delta)
+      scrollToDiffLine(nextLine, viewportHeight)
       return nextLine
     })
   }
@@ -326,7 +390,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
 
     let cancelled = false
     setAgentOptionsStatus("loading")
-    listProviderModels(process.cwd())
+    listProviderModels(gitCwd)
       .then((options) => {
         if (cancelled) return
         setAgentOptions(options)
@@ -367,7 +431,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     try {
       await dispatchReviewFix({
         agent: option.agent,
-        repoRoot: process.cwd(),
+        repoRoot: gitCwd,
         comments,
         provider: option.provider.id,
         model: option.model.id,
@@ -454,6 +518,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
 
     if (focusMode === "tree") {
       if ((key.name === "return" || key.name === "enter") && hasPatch) {
+        focusFirstSelectableDiffLine()
         setFocusMode("diff")
         return
       }
@@ -505,9 +570,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     if (key.name === "pagedown") moveDiffCursor(Math.max(1, getDiffViewportHeight() - 1))
     if (key.name === "pageup") moveDiffCursor(-Math.max(1, getDiffViewportHeight() - 1))
     if (key.name === "home") {
-      setSelectionAnchorLine(null)
-      setCurrentDiffLine(0)
-      setDiffScrollY(0)
+      focusFirstSelectableDiffLine()
     }
   })
 
@@ -556,6 +619,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
   const sidePanelWidth = Math.max(28, Math.floor((renderer?.terminalWidth ?? 100) * 0.28))
   const diffContentWidth = Math.max(30, (renderer?.terminalWidth ?? 100) - sidePanelWidth - 6)
   const lineNumberDigits = String(maxLineNumber(parsedDiff.metadata)).length
+  const currentSelectableDiffLine = selectableDiffLineOrdinal(currentDiffLine)
 
   return (
     <box style={{ width: "100%", height: "100%", flexDirection: "column", backgroundColor: theme.backgroundColor }}>
@@ -572,7 +636,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
         }}
       >
         <text
-          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : focusMode === "agent" ? "agent: ↑/↓ choose • enter run • esc cancel" : focusMode === "tree" ? `tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit${cliOptions.outputPath ? " • writes comments on quit" : ""}` : `diff: line ${Math.min(currentDiffLine + 1, diffLineCount)}/${diffLineCount} • ↑/↓ move • ctrl+d/u half-page • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
+          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : focusMode === "agent" ? "agent: ↑/↓ choose • enter run • esc cancel" : focusMode === "tree" ? `tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit${cliOptions.outputPath ? " • writes comments on quit" : ""}` : `diff: line ${Math.min(currentSelectableDiffLine, selectableDiffLineCount)}/${selectableDiffLineCount} • ↑/↓ move • ctrl+d/u half-page • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
         />
       </box>
 
@@ -782,7 +846,8 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
 
 try {
   git(["rev-parse", "--is-inside-work-tree"])
-  const diffHighlightWorker = startDiffHighlightWorker({ cwd: process.cwd() })
+  gitCwd = git(["rev-parse", "--show-toplevel"]).trim() || process.cwd()
+  const diffHighlightWorker = startDiffHighlightWorker({ cwd: gitCwd })
   const reviewActor = createActor(reviewMachine).start()
   const renderer = await createCliRenderer({
     exitOnCtrlC: true,
@@ -792,7 +857,7 @@ try {
       reviewActor.stop()
       if (!cliOptions.outputPath) return
       try {
-        writeReviewComments(cliOptions.outputPath, commentsByFile)
+        writeReviewComments(cliOptions.outputPath, commentsByFile, gitCwd)
       } catch (error) {
         console.error(error instanceof Error ? error.message : String(error))
       }
