@@ -12,7 +12,7 @@ import { reviewMachine, type ReviewComment } from "./review-machine"
 import { uiMachine, type ChangedFile } from "./ui-machine"
 import { availableAgents, dispatchReviewFix, listProviderModels, type AgentProviderModelOption } from "./agents"
 import { startDiffHighlightWorker, type DiffHighlightWorkerClient } from "./diff-highlight-worker-client"
-import { EMPTY_PARSED_DIFF_STATE, buildTerminalDiffRows, diffMetadataCacheKey, getDiffLineTypes, highlightedDiffCache, maxLineNumber, maxTerminalDiffContentScroll, parseDiffMetadata, renderTerminalDiffRow, type LineColor, type ParsedDiffState } from "./diff-rendering"
+import { buildTerminalDiffRows, diffMetadataCacheKey, getDiffLineTypes, highlightedDiffCache, maxLineNumber, maxTerminalDiffContentScroll, parseDiffMetadata, renderTerminalDiffRow, type LineColor } from "./diff-rendering"
 
 interface CliOptions {
   outputPath: string | null
@@ -188,8 +188,8 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     agentOptionsStatus,
     agentRunStatus,
     agentRunMessage,
+    parsedDiff,
   } = uiState.context
-  const [parsedDiff, setParsedDiff] = useState<ParsedDiffState>(EMPTY_PARSED_DIFF_STATE)
   const reviewState = useSelector(reviewActor, (snapshot) => snapshot)
   const sendReview = reviewActor.send
   const diffPanelRef = useRef<BoxRenderable | null>(null)
@@ -209,18 +209,19 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
 
   useEffect(() => {
     return diffHighlightWorker.subscribe(({ cacheKey, highlighted }) => {
-      setParsedDiff((current) => {
-        if (!current.metadata) return current
-        if (diffMetadataCacheKey(current.metadata) !== cacheKey) return current
-        return {
-          metadata: current.metadata,
+      if (!parsedDiff.metadata) return
+      if (diffMetadataCacheKey(parsedDiff.metadata) !== cacheKey) return
+      sendUi({
+        type: "diff.parsed.set",
+        parsedDiff: {
+          metadata: parsedDiff.metadata,
           highlighted,
-          rows: buildTerminalDiffRows(current.metadata, highlighted, diffTheme),
+          rows: buildTerminalDiffRows(parsedDiff.metadata, highlighted, diffTheme),
           error: null,
-        }
+        },
       })
     })
-  }, [diffHighlightWorker, diffTheme])
+  }, [diffHighlightWorker, diffTheme, parsedDiff.metadata, sendUi])
 
   const visibleFiles = useMemo(
     () => files.filter((file) => fuzzyMatches(`${file.status} ${file.path}`, fileSearchQuery)),
@@ -242,7 +243,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
 
   useEffect(() => {
     if (!hasPatch) {
-      setParsedDiff(EMPTY_PARSED_DIFF_STATE)
+      sendUi({ type: "diff.parsed.reset" })
       return
     }
 
@@ -252,22 +253,28 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
       const metadata = parseDiffMetadata(diff, selected?.path ?? "diff")
 
       const cachedHighlight = highlightedDiffCache.get(diffMetadataCacheKey(metadata)) ?? null
-      setParsedDiff({
-        metadata,
-        highlighted: cachedHighlight,
-        rows: buildTerminalDiffRows(metadata, cachedHighlight, diffTheme),
-        error: null,
+      sendUi({
+        type: "diff.parsed.set",
+        parsedDiff: {
+          metadata,
+          highlighted: cachedHighlight,
+          rows: buildTerminalDiffRows(metadata, cachedHighlight, diffTheme),
+          error: null,
+        },
       })
 
       if (!cachedHighlight) {
         void diffHighlightWorker.requestHighlight(selected?.path ?? "diff", diff)
           .then((highlighted) => {
             if (!cancelled) {
-              setParsedDiff({
-                metadata,
-                highlighted,
-                rows: buildTerminalDiffRows(metadata, highlighted, diffTheme),
-                error: null,
+              sendUi({
+                type: "diff.parsed.set",
+                parsedDiff: {
+                  metadata,
+                  highlighted,
+                  rows: buildTerminalDiffRows(metadata, highlighted, diffTheme),
+                  error: null,
+                },
               })
             }
           })
@@ -276,13 +283,13 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
           })
       }
     } catch (error) {
-      setParsedDiff({ metadata: null, highlighted: null, rows: [], error: error instanceof Error ? error.message : String(error) })
+      sendUi({ type: "diff.parsed.set", parsedDiff: { metadata: null, highlighted: null, rows: [], error: error instanceof Error ? error.message : String(error) } })
     }
 
     return () => {
       cancelled = true
     }
-  }, [diff, diffHighlightWorker, diffTheme, hasPatch, selected?.path])
+  }, [diff, diffHighlightWorker, diffTheme, hasPatch, selected?.path, sendUi])
 
   useEffect(() => {
     diffScrollRef.current?.scrollTo(diffScrollY)

@@ -1,5 +1,6 @@
 import { assign, createMachine } from "xstate"
 import type { AgentId, AgentProviderModelOption } from "./agents"
+import { EMPTY_PARSED_DIFF_STATE, type ParsedDiffState } from "./diff-rendering"
 
 export type FocusMode = "tree" | "diff" | "comment" | "agent"
 
@@ -34,6 +35,7 @@ export interface UiContext {
   agentOptionsStatus: "idle" | "loading" | "ready" | "error"
   agentRunStatus: "idle" | "running" | "done" | "error"
   agentRunMessage: string | null
+  parsedDiff: ParsedDiffState
 }
 
 export type UiEvent =
@@ -54,6 +56,8 @@ export type UiEvent =
   | { type: "agent.run.start"; message: string }
   | { type: "agent.run.done"; message: string }
   | { type: "agent.run.error"; message: string }
+  | { type: "diff.parsed.set"; parsedDiff: ParsedDiffState }
+  | { type: "diff.parsed.reset" }
   | { type: "diff.reset" }
   | { type: "diff.scrollY.set"; value: number }
   | { type: "diff.scrollX.set"; value: number }
@@ -84,6 +88,7 @@ export const uiMachine = createMachine({
     agentOptionsStatus: "idle",
     agentRunStatus: "idle",
     agentRunMessage: null,
+    parsedDiff: EMPTY_PARSED_DIFF_STATE,
   },
   on: {
     "files.set": {
@@ -193,6 +198,16 @@ export const uiMachine = createMachine({
       actions: assign({
         agentRunStatus: "error",
         agentRunMessage: ({ event }) => event.message,
+      }),
+    },
+    "diff.parsed.set": {
+      actions: assign({
+        parsedDiff: ({ event }) => event.parsedDiff,
+      }),
+    },
+    "diff.parsed.reset": {
+      actions: assign({
+        parsedDiff: EMPTY_PARSED_DIFF_STATE,
       }),
     },
     "diff.reset": {
