@@ -4,19 +4,15 @@ import { writeFileSync } from "node:fs"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { createCliRenderer, fg, bold, t, StyledText, type BoxRenderable, type ScrollBoxRenderable, type TextareaRenderable, type TextChunk } from "@opentui/core"
 import { createRoot, useKeyboard, useRenderer } from "@opentui/react"
-import { useSelector } from "@xstate/react"
+import { useMachine, useSelector } from "@xstate/react"
 import { createActor, type ActorRefFrom } from "xstate"
 import nightOwl from 'tm-themes/themes/github-dark.json'
 import { textMateThemeToDiffTheme } from "./theme-mapper"
 import { reviewMachine, type ReviewComment } from "./review-machine"
-import { availableAgents, dispatchReviewFix, listProviderModels, type AgentId, type AgentProviderModelOption } from "./agents"
+import { uiMachine, type ChangedFile } from "./ui-machine"
+import { availableAgents, dispatchReviewFix, listProviderModels, type AgentProviderModelOption } from "./agents"
 import { startDiffHighlightWorker, type DiffHighlightWorkerClient } from "./diff-highlight-worker-client"
-import { EMPTY_PARSED_DIFF_STATE, buildTerminalDiffRows, diffMetadataCacheKey, getDiffLineTypes, highlightedDiffCache, maxLineNumber, maxTerminalDiffContentScroll, parseDiffMetadata, renderTerminalDiffRow, type LineColor, type ParsedDiffState } from "./diff-rendering"
-
-interface ChangedFile {
-  path: string
-  status: string
-}
+import { buildTerminalDiffRows, diffMetadataCacheKey, getDiffLineTypes, highlightedDiffCache, maxLineNumber, maxTerminalDiffContentScroll, parseDiffMetadata, renderTerminalDiffRow, type LineColor } from "./diff-rendering"
 
 interface CliOptions {
   outputPath: string | null
@@ -175,22 +171,27 @@ function renderFileTree(files: ChangedFile[], selectedIndex: number, emptyMessag
 
 function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHighlightWorkerClient; reviewActor: ActorRefFrom<typeof reviewMachine> }) {
   const renderer = useRenderer()
-  const [files, setFiles] = useState<ChangedFile[]>(() => loadChangedFiles())
-  const [selectedIndex, setSelectedIndex] = useState(0)
-  const [fileSearchQuery, setFileSearchQuery] = useState("")
-  const [focusMode, setFocusMode] = useState<"tree" | "diff" | "comment" | "agent">("tree")
-  const [diffScrollY, setDiffScrollY] = useState(0)
-  const [diffScrollX, setDiffScrollX] = useState(0)
-  const [currentDiffLine, setCurrentDiffLine] = useState(0)
-  const [selectionAnchorLine, setSelectionAnchorLine] = useState<number | null>(null)
-  const [selectedAgentIndex, setSelectedAgentIndex] = useState(0)
-  const [selectedPickerAgent, setSelectedPickerAgent] = useState<AgentId>(availableAgents[0]?.id ?? "codex")
-  const [agentSearchQuery, setAgentSearchQuery] = useState("")
-  const [agentOptions, setAgentOptions] = useState<AgentProviderModelOption[]>([])
-  const [agentOptionsStatus, setAgentOptionsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle")
-  const [agentRunStatus, setAgentRunStatus] = useState<"idle" | "running" | "done" | "error">("idle")
-  const [agentRunMessage, setAgentRunMessage] = useState<string | null>(null)
-  const [parsedDiff, setParsedDiff] = useState<ParsedDiffState>(EMPTY_PARSED_DIFF_STATE)
+  const [uiState, sendUi] = useMachine(uiMachine)
+  const {
+    files,
+    selectedIndex,
+    fileSearchQuery,
+    diffScrollY,
+    diffScrollX,
+    currentDiffLine,
+    selectionAnchorLine,
+    selectedAgentIndex,
+    selectedPickerAgent,
+    agentSearchQuery,
+    agentOptions,
+    agentOptionsStatus,
+    agentRunStatus,
+    agentRunMessage,
+    parsedDiff,
+  } = uiState.context
+  const isTreeFocused = uiState.matches("tree")
+  const isDiffFocused = uiState.matches("diff")
+  const isAgentFocused = uiState.matches("agent")
   const reviewState = useSelector(reviewActor, (snapshot) => snapshot)
   const sendReview = reviewActor.send
   const diffPanelRef = useRef<BoxRenderable | null>(null)
@@ -201,23 +202,28 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
   const activeDraft = reviewState.context.draft
 
   useEffect(() => {
+    sendUi({ type: "files.set", files: loadChangedFiles(), selectedIndex: 0 })
+  }, [sendUi])
+
+  useEffect(() => {
     diffHighlightWorker.enqueueFiles(files)
   }, [diffHighlightWorker, files])
 
   useEffect(() => {
     return diffHighlightWorker.subscribe(({ cacheKey, highlighted }) => {
-      setParsedDiff((current) => {
-        if (!current.metadata) return current
-        if (diffMetadataCacheKey(current.metadata) !== cacheKey) return current
-        return {
-          metadata: current.metadata,
+      if (!parsedDiff.metadata) return
+      if (diffMetadataCacheKey(parsedDiff.metadata) !== cacheKey) return
+      sendUi({
+        type: "diff.parsed.set",
+        parsedDiff: {
+          metadata: parsedDiff.metadata,
           highlighted,
-          rows: buildTerminalDiffRows(current.metadata, highlighted, diffTheme),
+          rows: buildTerminalDiffRows(parsedDiff.metadata, highlighted, diffTheme),
           error: null,
-        }
+        },
       })
     })
-  }, [diffHighlightWorker, diffTheme])
+  }, [diffHighlightWorker, diffTheme, parsedDiff.metadata, sendUi])
 
   const visibleFiles = useMemo(
     () => files.filter((file) => fuzzyMatches(`${file.status} ${file.path}`, fileSearchQuery)),
@@ -239,7 +245,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
 
   useEffect(() => {
     if (!hasPatch) {
-      setParsedDiff(EMPTY_PARSED_DIFF_STATE)
+      sendUi({ type: "diff.parsed.reset" })
       return
     }
 
@@ -249,22 +255,28 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
       const metadata = parseDiffMetadata(diff, selected?.path ?? "diff")
 
       const cachedHighlight = highlightedDiffCache.get(diffMetadataCacheKey(metadata)) ?? null
-      setParsedDiff({
-        metadata,
-        highlighted: cachedHighlight,
-        rows: buildTerminalDiffRows(metadata, cachedHighlight, diffTheme),
-        error: null,
+      sendUi({
+        type: "diff.parsed.set",
+        parsedDiff: {
+          metadata,
+          highlighted: cachedHighlight,
+          rows: buildTerminalDiffRows(metadata, cachedHighlight, diffTheme),
+          error: null,
+        },
       })
 
       if (!cachedHighlight) {
         void diffHighlightWorker.requestHighlight(selected?.path ?? "diff", diff)
           .then((highlighted) => {
             if (!cancelled) {
-              setParsedDiff({
-                metadata,
-                highlighted,
-                rows: buildTerminalDiffRows(metadata, highlighted, diffTheme),
-                error: null,
+              sendUi({
+                type: "diff.parsed.set",
+                parsedDiff: {
+                  metadata,
+                  highlighted,
+                  rows: buildTerminalDiffRows(metadata, highlighted, diffTheme),
+                  error: null,
+                },
               })
             }
           })
@@ -273,39 +285,34 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
           })
       }
     } catch (error) {
-      setParsedDiff({ metadata: null, highlighted: null, rows: [], error: error instanceof Error ? error.message : String(error) })
+      sendUi({ type: "diff.parsed.set", parsedDiff: { metadata: null, highlighted: null, rows: [], error: error instanceof Error ? error.message : String(error) } })
     }
 
     return () => {
       cancelled = true
     }
-  }, [diff, diffHighlightWorker, diffTheme, hasPatch, selected?.path])
+  }, [diff, diffHighlightWorker, diffTheme, hasPatch, selected?.path, sendUi])
 
   useEffect(() => {
     diffScrollRef.current?.scrollTo(diffScrollY)
   }, [diffScrollY])
 
   useEffect(() => {
-    if (focusMode !== "diff" || diffLineCount === 0 || isSelectableDiffLine(currentDiffLine)) return
+    if (!isDiffFocused || diffLineCount === 0 || isSelectableDiffLine(currentDiffLine)) return
     const firstLine = firstSelectableDiffLine()
     if (firstLine !== -1) {
-      setCurrentDiffLine(firstLine)
+      sendUi({ type: "diff.currentLine.set", value: firstLine })
       scrollToDiffLine(firstLine)
     }
-  }, [currentDiffLine, diffLineCount, focusMode, parsedDiff.rows])
+  }, [currentDiffLine, diffLineCount, isDiffFocused, parsedDiff.rows, sendUi])
 
   function resetDiffState(): void {
-    setDiffScrollY(0)
-    setDiffScrollX(0)
-    setCurrentDiffLine(0)
-    setSelectionAnchorLine(null)
-    setFocusMode("tree")
+    sendUi({ type: "diff.reset" })
   }
 
   function selectFile(nextIndex: number): void {
     const clampedIndex = Math.max(0, Math.min(visibleFiles.length - 1, nextIndex))
-    if (visibleFiles[clampedIndex]?.path !== selected?.path) resetDiffState()
-    setSelectedIndex(clampedIndex)
+    sendUi({ type: "files.select", selectedIndex: clampedIndex, resetDiff: visibleFiles[clampedIndex]?.path !== selected?.path })
   }
 
   function getDiffViewportHeight(): number {
@@ -356,40 +363,37 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     return nextLine
   }
 
+  function scrollYForDiffLine(nextLine: number, scrollY = diffScrollY, viewportHeight = getDiffViewportHeight()): number {
+    if (nextLine < scrollY) return nextLine
+    if (nextLine >= scrollY + viewportHeight) return nextLine - viewportHeight + 1
+    return scrollY
+  }
+
   function scrollToDiffLine(nextLine: number, viewportHeight = getDiffViewportHeight()): void {
-    setDiffScrollY((scrollY) => {
-      if (nextLine < scrollY) return nextLine
-      if (nextLine >= scrollY + viewportHeight) return nextLine - viewportHeight + 1
-      return scrollY
-    })
+    sendUi({ type: "diff.scrollY.set", value: scrollYForDiffLine(nextLine, diffScrollY, viewportHeight) })
   }
 
   function focusFirstSelectableDiffLine(): void {
     const firstLine = firstSelectableDiffLine()
-    setCurrentDiffLine(firstLine === -1 ? 0 : firstLine)
-    setDiffScrollY(0)
-    setDiffScrollX(0)
-    setSelectionAnchorLine(null)
+    sendUi({ type: "diff.focusFirstSelectableLine", line: firstLine === -1 ? 0 : firstLine })
   }
 
   function moveDiffCursor(delta: number, extendSelection = false): void {
     if (diffLineCount === 0) return
     const viewportHeight = getDiffViewportHeight()
-
-    setCurrentDiffLine((line) => {
-      if (extendSelection) setSelectionAnchorLine((anchor) => anchor ?? line)
-      else setSelectionAnchorLine(null)
-
-      const startLine = isSelectableDiffLine(line) ? line : firstSelectableDiffLine()
-      if (startLine === -1) return line
-      const nextLine = findSelectableDiffLine(startLine, delta)
-      scrollToDiffLine(nextLine, viewportHeight)
-      return nextLine
+    const startLine = isSelectableDiffLine(currentDiffLine) ? currentDiffLine : firstSelectableDiffLine()
+    if (startLine === -1) return
+    const nextLine = findSelectableDiffLine(startLine, delta)
+    sendUi({
+      type: "diff.cursorMoved",
+      line: nextLine,
+      scrollY: scrollYForDiffLine(nextLine, diffScrollY, viewportHeight),
+      selectionAnchorLine: extendSelection ? selectionAnchorLine ?? currentDiffLine : null,
     })
   }
 
   function moveDiffHorizontally(delta: number): void {
-    setDiffScrollX((scrollX) => Math.max(0, Math.min(diffMaxScrollX, scrollX + delta)))
+    sendUi({ type: "diff.scrollX.set", value: Math.max(0, Math.min(diffMaxScrollX, diffScrollX + delta)) })
   }
 
   function findCommentForLine(filePath: string, line: number): ReviewComment | undefined {
@@ -399,29 +403,24 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
   }
 
   useEffect(() => {
-    if (focusMode !== "agent" || agentOptionsStatus !== "idle") return
+    if (!isAgentFocused || agentOptionsStatus !== "idle") return
 
     let cancelled = false
-    setAgentOptionsStatus("loading")
+    sendUi({ type: "agent.options.loading" })
     listProviderModels(gitCwd)
       .then((options) => {
         if (cancelled) return
-        setAgentOptions(options)
-        setSelectedAgentIndex(0)
-        setAgentOptionsStatus("ready")
+        sendUi({ type: "agent.options.loaded", options })
       })
       .catch((error) => {
         if (cancelled) return
-        setAgentOptions([])
-        setAgentOptionsStatus("error")
-        setAgentRunStatus("error")
-        setAgentRunMessage(error instanceof Error ? error.message : String(error))
+        sendUi({ type: "agent.options.failed", message: error instanceof Error ? error.message : String(error) })
       })
 
     return () => {
       cancelled = true
     }
-  }, [agentOptionsStatus, focusMode])
+  }, [agentOptionsStatus, isAgentFocused, sendUi])
 
   async function runFixAgent(option: AgentProviderModelOption): Promise<void> {
     const comments = Object.values(reviewState.context.commentsByFile).flat().map((comment) => ({
@@ -432,14 +431,11 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
       body: comment.body,
     }))
     if (comments.length === 0) {
-      setAgentRunStatus("error")
-      setAgentRunMessage("No review comments to fix.")
+      sendUi({ type: "agent.run.error", message: "No review comments to fix." })
       return
     }
 
-    setFocusMode("diff")
-    setAgentRunStatus("running")
-    setAgentRunMessage(`Running ${option.agentLabel} with ${option.provider.label}/${option.model.label}...`)
+    sendUi({ type: "agent.run.start", message: `Running ${option.agentLabel} with ${option.provider.label}/${option.model.label}...` })
 
     try {
       await dispatchReviewFix({
@@ -449,13 +445,11 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
         provider: option.provider.id,
         model: option.model.id,
       })
-      setAgentRunStatus("done")
-      setAgentRunMessage(`${option.agentLabel} finished. Cleared review comments and refreshed git status.`)
+      sendUi({ type: "agent.run.done", message: `${option.agentLabel} finished. Cleared review comments and refreshed git status.` })
       sendReview({ type: "review.reset" })
       refresh()
     } catch (error) {
-      setAgentRunStatus("error")
-      setAgentRunMessage(error instanceof Error ? error.message : String(error))
+      sendUi({ type: "agent.run.error", message: error instanceof Error ? error.message : String(error) })
     }
   }
 
@@ -463,9 +457,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     const nextFiles = loadChangedFiles()
     const nextVisibleFiles = nextFiles.filter((file) => fuzzyMatches(`${file.status} ${file.path}`, fileSearchQuery))
     const nextIndex = Math.max(0, Math.min(effectiveSelectedIndex, nextVisibleFiles.length - 1))
-    if (nextVisibleFiles[nextIndex]?.path !== selected?.path) resetDiffState()
-    setFiles(nextFiles)
-    setSelectedIndex(nextIndex)
+    sendUi({ type: "files.set", files: nextFiles, selectedIndex: nextIndex, resetDiff: nextVisibleFiles[nextIndex]?.path !== selected?.path })
   }
 
   useKeyboard((key) => {
@@ -473,48 +465,41 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     if (key.name === "r") refresh()
 
     if (key.ctrl && key.name === "s" && !isDraftingComment && agentRunStatus !== "running") {
-      setFocusMode("agent")
-      setAgentRunStatus("idle")
-      setAgentRunMessage(null)
-      setSelectedAgentIndex(0)
-      setAgentSearchQuery("")
-      if (agentOptionsStatus === "error") setAgentOptionsStatus("idle")
+      sendUi({ type: "agent.open" })
       return
     }
 
     if (key.name === "escape") {
       if (isDraftingComment) {
         sendReview({ type: "comment.cancel" })
-        setFocusMode("diff")
-      } else if (focusMode === "agent") {
-        setFocusMode("diff")
+        sendUi({ type: "focus.set", focusMode: "diff" })
+      } else if (isAgentFocused) {
+        sendUi({ type: "focus.set", focusMode: "diff" })
       } else {
-        setSelectionAnchorLine(null)
-        setFocusMode("tree")
+        sendUi({ type: "diff.selectionAnchor.set", value: null })
+        sendUi({ type: "focus.set", focusMode: "tree" })
       }
       return
     }
 
     if (isDraftingComment || agentRunStatus === "running") return
 
-    if (focusMode === "agent") {
+    if (isAgentFocused) {
       const numberKey = Number(key.name)
       if (Number.isInteger(numberKey) && numberKey >= 1 && numberKey <= availableAgents.length) {
-        setSelectedPickerAgent(availableAgents[numberKey - 1]!.id)
-        setSelectedAgentIndex(0)
+        sendUi({ type: "agent.pickerAgent.set", agent: availableAgents[numberKey - 1]!.id })
         return
       }
       if (key.name === "backspace") {
-        setAgentSearchQuery((query) => query.slice(0, -1))
-        setSelectedAgentIndex(0)
+        sendUi({ type: "agent.search.backspace" })
         return
       }
       if (key.name === "down") {
-        setSelectedAgentIndex((index) => Math.min(filteredAgentOptions.length - 1, index + 1))
+        sendUi({ type: "agent.selectedIndex.set", selectedIndex: Math.min(filteredAgentOptions.length - 1, selectedAgentIndex + 1) })
         return
       }
       if (key.name === "up") {
-        setSelectedAgentIndex((index) => Math.max(0, index - 1))
+        sendUi({ type: "agent.selectedIndex.set", selectedIndex: Math.max(0, selectedAgentIndex - 1) })
         return
       }
       if (key.name === "return" || key.name === "enter") {
@@ -523,28 +508,23 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
         return
       }
       if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
-        setAgentSearchQuery((query) => query + key.sequence)
-        setSelectedAgentIndex(0)
+        sendUi({ type: "agent.search.append", char: key.sequence })
       }
       return
     }
 
-    if (focusMode === "tree") {
+    if (isTreeFocused) {
       if ((key.name === "return" || key.name === "enter") && hasPatch) {
         focusFirstSelectableDiffLine()
-        setFocusMode("diff")
+        sendUi({ type: "focus.set", focusMode: "diff" })
         return
       }
       if (key.name === "backspace") {
-        setFileSearchQuery((query) => query.slice(0, -1))
-        setSelectedIndex(0)
-        resetDiffState()
+        sendUi({ type: "files.search.backspace" })
         return
       }
       if (key.ctrl && key.name === "u") {
-        setFileSearchQuery("")
-        setSelectedIndex(0)
-        resetDiffState()
+        sendUi({ type: "files.search.clear" })
         return
       }
       if (key.name === "down" || key.name === "j") {
@@ -556,9 +536,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
         return
       }
       if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
-        setFileSearchQuery((query) => query + key.sequence)
-        setSelectedIndex(0)
-        resetDiffState()
+        sendUi({ type: "files.search.append", char: key.sequence })
       }
       return
     }
@@ -572,7 +550,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
         const range = selectedRange ?? { start: currentDiffLine, end: currentDiffLine }
         sendReview({ type: "comment.start", filePath: selected.path, startLine: range.start, endLine: range.end })
       }
-      setFocusMode("comment")
+      sendUi({ type: "focus.set", focusMode: "comment" })
       return
     }
 
@@ -628,7 +606,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     for (let line = highlightedRange.start; line <= highlightedRange.end; line++) {
       pierreOverlays.set(line, { gutter: diffTheme.selectionBg, content: diffTheme.selectionBg })
     }
-  } else if (focusMode === "diff" && diffLineCount > 0) {
+  } else if (isDiffFocused && diffLineCount > 0) {
     pierreOverlays.set(currentDiffLine, { gutter: diffTheme.activeLineNumberBg, content: diffTheme.activeLineBg })
   }
   const sidePanelWidth = Math.max(28, Math.floor((renderer?.terminalWidth ?? 100) * 0.28))
@@ -652,11 +630,11 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
         }}
       >
         <text
-          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : focusMode === "agent" ? "agent: ↑/↓ choose • enter run • esc cancel" : focusMode === "tree" ? `tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit${cliOptions.outputPath ? " • writes comments on quit" : ""}` : `diff: line ${Math.min(currentSelectableDiffLine, selectableDiffLineCount)}/${selectableDiffLineCount} • ↑/↓ move • ←/→ pan • ctrl+d/u half-page • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
+          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : isAgentFocused ? "agent: ↑/↓ choose • enter run • esc cancel" : isTreeFocused ? `tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit${cliOptions.outputPath ? " • writes comments on quit" : ""}` : `diff: line ${Math.min(currentSelectableDiffLine, selectableDiffLineCount)}/${selectableDiffLineCount} • ↑/↓ move • ←/→ pan • ctrl+d/u half-page • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
         />
       </box>
 
-      {agentRunMessage && focusMode !== "agent" ? (
+      {agentRunMessage && !isAgentFocused ? (
         <box
           style={{
             position: "absolute",
@@ -684,7 +662,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
             flexGrow: 1,
             minWidth: 30,
             border: true,
-            borderColor: focusMode === "diff" ? theme.accent : theme.borderColor,
+            borderColor: isDiffFocused ? theme.accent : theme.borderColor,
             backgroundColor: diffTheme.backgroundColor,
           }}
         >
@@ -755,7 +733,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
                     onSubmit={() => {
                       sendReview({ type: "comment.updateDraft", body: commentTextareaRef.current?.plainText ?? "" })
                       sendReview({ type: "comment.save" })
-                      setFocusMode("diff")
+                      sendUi({ type: "focus.set", focusMode: "diff" })
                     }}
                     style={{ flexGrow: 1, paddingLeft: 1, paddingRight: 1 }}
                   />
@@ -781,7 +759,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
               height: 3,
               flexShrink: 0,
               border: true,
-              borderColor: focusMode === "tree" ? theme.accent : theme.borderColor,
+              borderColor: isTreeFocused ? theme.accent : theme.borderColor,
               backgroundColor: theme.panelColor,
               paddingLeft: 1,
               alignItems: "center",
@@ -791,7 +769,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
           </box>
           <scrollbox
             style={{ flexGrow: 1, flexShrink: 1 }}
-            rootOptions={{ border: true, borderColor: focusMode === "tree" ? theme.accent : theme.borderColor, backgroundColor: theme.panelColor, title: ` Files ${visibleFiles.length}/${files.length} ` }}
+            rootOptions={{ border: true, borderColor: isTreeFocused ? theme.accent : theme.borderColor, backgroundColor: theme.panelColor, title: ` Files ${visibleFiles.length}/${files.length} ` }}
             viewportOptions={{ backgroundColor: theme.panelColor }}
             contentOptions={{ backgroundColor: theme.panelColor, paddingLeft: 1 }}
           >
@@ -800,7 +778,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
         </box>
       </box>
 
-      {focusMode === "agent" ? (
+      {isAgentFocused ? (
         <box
           title=" Fix with agent "
           style={{
