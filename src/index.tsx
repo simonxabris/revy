@@ -2,6 +2,7 @@
 /** @jsxImportSource @opentui/react */
 import { writeFileSync } from "node:fs"
 import { useEffect, useMemo, useRef, useState } from "react"
+import packageJson from "../package.json" with { type: "json" }
 import { createCliRenderer, fg, bold, t, StyledText, type BoxRenderable, type ScrollBoxRenderable, type TextareaRenderable, type TextChunk } from "@opentui/core"
 import { createRoot, useKeyboard, useRenderer } from "@opentui/react"
 import { useMachine, useSelector } from "@xstate/react"
@@ -18,6 +19,10 @@ interface CliOptions {
   outputPath: string | null
 }
 
+function readPackageVersion(): string {
+  return packageJson.version ?? "unknown"
+}
+
 function parseCliOptions(argv: string[]): CliOptions {
   let outputPath: string | null = null
 
@@ -31,8 +36,12 @@ function parseCliOptions(argv: string[]): CliOptions {
       outputPath = arg.slice("--output=".length)
       continue
     }
+    if (arg === "--version") {
+      console.log(readPackageVersion())
+      process.exit(0)
+    }
     if (arg === "--help" || arg === "-h") {
-      console.log("Usage: revy [--output <comments.json>]")
+      console.log("Usage: revy [--version] [--output <comments.json>]")
       process.exit(0)
     }
   }
