@@ -27,7 +27,7 @@ const pendingPrehighlightKeys = new Set<string>()
 const highlighterPromise: Promise<DiffsHighlighter> = getSharedHighlighter({
   ...getHighlighterOptions("tsx", { theme: "pierre-dark" }),
   langs: ["tsx", "typescript", "javascript", "jsx", "json", "markdown", "css", "html", "bash", "yaml", "rust", "text"],
-  preferredHighlighter: "shiki-js",
+  preferredHighlighter: "shiki-wasm",
 })
 
 void highlighterPromise.then(() => workerGlobal.postMessage({ type: "ready" } satisfies ReadyMessage)).catch((error) => {
