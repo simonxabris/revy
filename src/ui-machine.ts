@@ -6,7 +6,6 @@ export type FocusMode = "tree" | "diff" | "comment" | "agent"
 
 function resetDiffContext() {
   return {
-    focusMode: "tree" as const,
     diffScrollY: 0,
     diffScrollX: 0,
     currentDiffLine: 0,
@@ -23,7 +22,6 @@ export interface UiContext {
   files: ChangedFile[]
   selectedIndex: number
   fileSearchQuery: string
-  focusMode: FocusMode
   diffScrollY: number
   diffScrollX: number
   currentDiffLine: number
@@ -72,11 +70,11 @@ export const uiMachine = createMachine({
     events: UiEvent
   },
   id: "ui",
+  initial: "tree",
   context: {
     files: [],
     selectedIndex: 0,
     fileSearchQuery: "",
-    focusMode: "tree",
     diffScrollY: 0,
     diffScrollX: 0,
     currentDiffLine: 0,
@@ -90,21 +88,47 @@ export const uiMachine = createMachine({
     agentRunMessage: null,
     parsedDiff: EMPTY_PARSED_DIFF_STATE,
   },
+  states: {
+    tree: {},
+    diff: {},
+    comment: {},
+    agent: {},
+  },
   on: {
-    "files.set": {
-      actions: assign(({ event }) => ({
-        files: event.files,
-        selectedIndex: event.selectedIndex,
-        ...(event.resetDiff ? resetDiffContext() : {}),
-      })),
-    },
-    "files.select": {
-      actions: assign(({ event }) => ({
-        selectedIndex: event.selectedIndex,
-        ...(event.resetDiff ? resetDiffContext() : {}),
-      })),
-    },
+    "files.set": [
+      {
+        guard: ({ event }) => Boolean(event.resetDiff),
+        target: ".tree",
+        actions: assign(({ event }) => ({
+          files: event.files,
+          selectedIndex: event.selectedIndex,
+          ...resetDiffContext(),
+        })),
+      },
+      {
+        actions: assign(({ event }) => ({
+          files: event.files,
+          selectedIndex: event.selectedIndex,
+        })),
+      },
+    ],
+    "files.select": [
+      {
+        guard: ({ event }) => Boolean(event.resetDiff),
+        target: ".tree",
+        actions: assign(({ event }) => ({
+          selectedIndex: event.selectedIndex,
+          ...resetDiffContext(),
+        })),
+      },
+      {
+        actions: assign(({ event }) => ({
+          selectedIndex: event.selectedIndex,
+        })),
+      },
+    ],
     "files.search.append": {
+      target: ".tree",
       actions: assign(({ context, event }) => ({
         fileSearchQuery: context.fileSearchQuery + event.char,
         selectedIndex: 0,
@@ -112,6 +136,7 @@ export const uiMachine = createMachine({
       })),
     },
     "files.search.backspace": {
+      target: ".tree",
       actions: assign(({ context }) => ({
         fileSearchQuery: context.fileSearchQuery.slice(0, -1),
         selectedIndex: 0,
@@ -119,20 +144,22 @@ export const uiMachine = createMachine({
       })),
     },
     "files.search.clear": {
+      target: ".tree",
       actions: assign({
         fileSearchQuery: "",
         selectedIndex: 0,
         ...resetDiffContext(),
       }),
     },
-    "focus.set": {
-      actions: assign({
-        focusMode: ({ event }) => event.focusMode,
-      }),
-    },
+    "focus.set": [
+      { guard: ({ event }) => event.focusMode === "tree", target: ".tree" },
+      { guard: ({ event }) => event.focusMode === "diff", target: ".diff" },
+      { guard: ({ event }) => event.focusMode === "comment", target: ".comment" },
+      { guard: ({ event }) => event.focusMode === "agent", target: ".agent" },
+    ],
     "agent.open": {
+      target: ".agent",
       actions: assign(({ context }) => ({
-        focusMode: "agent" as const,
         agentRunStatus: "idle" as const,
         agentRunMessage: null,
         selectedAgentIndex: 0,
@@ -182,8 +209,8 @@ export const uiMachine = createMachine({
       }),
     },
     "agent.run.start": {
+      target: ".diff",
       actions: assign({
-        focusMode: "diff",
         agentRunStatus: "running",
         agentRunMessage: ({ event }) => event.message,
       }),
@@ -211,13 +238,8 @@ export const uiMachine = createMachine({
       }),
     },
     "diff.reset": {
-      actions: assign({
-        focusMode: "tree",
-        diffScrollY: 0,
-        diffScrollX: 0,
-        currentDiffLine: 0,
-        selectionAnchorLine: null,
-      }),
+      target: ".tree",
+      actions: assign(resetDiffContext()),
     },
     "diff.scrollY.set": {
       actions: assign({

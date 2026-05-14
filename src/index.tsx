@@ -176,7 +176,6 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     files,
     selectedIndex,
     fileSearchQuery,
-    focusMode,
     diffScrollY,
     diffScrollX,
     currentDiffLine,
@@ -190,6 +189,9 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     agentRunMessage,
     parsedDiff,
   } = uiState.context
+  const isTreeFocused = uiState.matches("tree")
+  const isDiffFocused = uiState.matches("diff")
+  const isAgentFocused = uiState.matches("agent")
   const reviewState = useSelector(reviewActor, (snapshot) => snapshot)
   const sendReview = reviewActor.send
   const diffPanelRef = useRef<BoxRenderable | null>(null)
@@ -296,13 +298,13 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
   }, [diffScrollY])
 
   useEffect(() => {
-    if (focusMode !== "diff" || diffLineCount === 0 || isSelectableDiffLine(currentDiffLine)) return
+    if (!isDiffFocused || diffLineCount === 0 || isSelectableDiffLine(currentDiffLine)) return
     const firstLine = firstSelectableDiffLine()
     if (firstLine !== -1) {
       sendUi({ type: "diff.currentLine.set", value: firstLine })
       scrollToDiffLine(firstLine)
     }
-  }, [currentDiffLine, diffLineCount, focusMode, parsedDiff.rows, sendUi])
+  }, [currentDiffLine, diffLineCount, isDiffFocused, parsedDiff.rows, sendUi])
 
   function resetDiffState(): void {
     sendUi({ type: "diff.reset" })
@@ -401,7 +403,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
   }
 
   useEffect(() => {
-    if (focusMode !== "agent" || agentOptionsStatus !== "idle") return
+    if (!isAgentFocused || agentOptionsStatus !== "idle") return
 
     let cancelled = false
     sendUi({ type: "agent.options.loading" })
@@ -418,7 +420,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     return () => {
       cancelled = true
     }
-  }, [agentOptionsStatus, focusMode, sendUi])
+  }, [agentOptionsStatus, isAgentFocused, sendUi])
 
   async function runFixAgent(option: AgentProviderModelOption): Promise<void> {
     const comments = Object.values(reviewState.context.commentsByFile).flat().map((comment) => ({
@@ -471,7 +473,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
       if (isDraftingComment) {
         sendReview({ type: "comment.cancel" })
         sendUi({ type: "focus.set", focusMode: "diff" })
-      } else if (focusMode === "agent") {
+      } else if (isAgentFocused) {
         sendUi({ type: "focus.set", focusMode: "diff" })
       } else {
         sendUi({ type: "diff.selectionAnchor.set", value: null })
@@ -482,7 +484,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
 
     if (isDraftingComment || agentRunStatus === "running") return
 
-    if (focusMode === "agent") {
+    if (isAgentFocused) {
       const numberKey = Number(key.name)
       if (Number.isInteger(numberKey) && numberKey >= 1 && numberKey <= availableAgents.length) {
         sendUi({ type: "agent.pickerAgent.set", agent: availableAgents[numberKey - 1]!.id })
@@ -511,7 +513,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
       return
     }
 
-    if (focusMode === "tree") {
+    if (isTreeFocused) {
       if ((key.name === "return" || key.name === "enter") && hasPatch) {
         focusFirstSelectableDiffLine()
         sendUi({ type: "focus.set", focusMode: "diff" })
@@ -604,7 +606,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
     for (let line = highlightedRange.start; line <= highlightedRange.end; line++) {
       pierreOverlays.set(line, { gutter: diffTheme.selectionBg, content: diffTheme.selectionBg })
     }
-  } else if (focusMode === "diff" && diffLineCount > 0) {
+  } else if (isDiffFocused && diffLineCount > 0) {
     pierreOverlays.set(currentDiffLine, { gutter: diffTheme.activeLineNumberBg, content: diffTheme.activeLineBg })
   }
   const sidePanelWidth = Math.max(28, Math.floor((renderer?.terminalWidth ?? 100) * 0.28))
@@ -628,11 +630,11 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
         }}
       >
         <text
-          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : focusMode === "agent" ? "agent: ↑/↓ choose • enter run • esc cancel" : focusMode === "tree" ? `tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit${cliOptions.outputPath ? " • writes comments on quit" : ""}` : `diff: line ${Math.min(currentSelectableDiffLine, selectableDiffLineCount)}/${selectableDiffLineCount} • ↑/↓ move • ←/→ pan • ctrl+d/u half-page • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
+          content={t`${bold(fg(theme.accent)("revy"))} ${fg(theme.muted)(agentRunStatus === "running" ? agentRunMessage ?? "Running agent..." : isAgentFocused ? "agent: ↑/↓ choose • enter run • esc cancel" : isTreeFocused ? `tree: ↑/k ↓/j select • enter diff • ctrl+s fix • r refresh • q quit${cliOptions.outputPath ? " • writes comments on quit" : ""}` : `diff: line ${Math.min(currentSelectableDiffLine, selectableDiffLineCount)}/${selectableDiffLineCount} • ↑/↓ move • ←/→ pan • ctrl+d/u half-page • shift+↑/↓ select • enter comment • ctrl+s fix • esc tree • q quit`)}`}
         />
       </box>
 
-      {agentRunMessage && focusMode !== "agent" ? (
+      {agentRunMessage && !isAgentFocused ? (
         <box
           style={{
             position: "absolute",
@@ -660,7 +662,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
             flexGrow: 1,
             minWidth: 30,
             border: true,
-            borderColor: focusMode === "diff" ? theme.accent : theme.borderColor,
+            borderColor: isDiffFocused ? theme.accent : theme.borderColor,
             backgroundColor: diffTheme.backgroundColor,
           }}
         >
@@ -757,7 +759,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
               height: 3,
               flexShrink: 0,
               border: true,
-              borderColor: focusMode === "tree" ? theme.accent : theme.borderColor,
+              borderColor: isTreeFocused ? theme.accent : theme.borderColor,
               backgroundColor: theme.panelColor,
               paddingLeft: 1,
               alignItems: "center",
@@ -767,7 +769,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
           </box>
           <scrollbox
             style={{ flexGrow: 1, flexShrink: 1 }}
-            rootOptions={{ border: true, borderColor: focusMode === "tree" ? theme.accent : theme.borderColor, backgroundColor: theme.panelColor, title: ` Files ${visibleFiles.length}/${files.length} ` }}
+            rootOptions={{ border: true, borderColor: isTreeFocused ? theme.accent : theme.borderColor, backgroundColor: theme.panelColor, title: ` Files ${visibleFiles.length}/${files.length} ` }}
             viewportOptions={{ backgroundColor: theme.panelColor }}
             contentOptions={{ backgroundColor: theme.panelColor, paddingLeft: 1 }}
           >
@@ -776,7 +778,7 @@ function App({ diffHighlightWorker, reviewActor }: { diffHighlightWorker: DiffHi
         </box>
       </box>
 
-      {focusMode === "agent" ? (
+      {isAgentFocused ? (
         <box
           title=" Fix with agent "
           style={{
